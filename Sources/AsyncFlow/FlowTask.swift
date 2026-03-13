@@ -13,7 +13,7 @@ public struct FlowTask<ID: Hashable & Sendable, Success: Sendable>: Sendable {
     public let policy: DuplicateIDPolicy
     public let work: @Sendable () async throws -> Success
     public let onResult: (@Sendable (Success) async -> Void)?
-    public let onError: @Sendable (Error) -> Void
+    public let onError: (@Sendable (Error) -> Void)?
     public let onCancellation: (@Sendable () -> Void)?
 
     public init(
@@ -21,7 +21,7 @@ public struct FlowTask<ID: Hashable & Sendable, Success: Sendable>: Sendable {
         policy: DuplicateIDPolicy = .cancelAndReplace,
         work: @Sendable @escaping () async throws -> Success,
         onResult: (@Sendable (Success) async -> Void)? = nil,
-        onError: @Sendable @escaping (Error) -> Void,
+        onError: (@Sendable (Error) -> Void)? = nil,
         onCancellation: (@Sendable () -> Void)? = nil
     ) {
         self.id = id
@@ -39,7 +39,7 @@ public extension FlowTask where ID == UUID {
         policy: DuplicateIDPolicy = .cancelAndReplace,
         work: @Sendable @escaping () async throws -> Success,
         onResult: (@Sendable (Success) async -> Void)? = nil,
-        onError: @Sendable @escaping (Error) -> Void,
+        onError: (@Sendable (Error) -> Void)? = nil,
         onCancellation: (@Sendable () -> Void)? = nil
     ) {
         self.init(
