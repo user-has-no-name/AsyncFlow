@@ -30,9 +30,12 @@ public extension Executable {
 
     @discardableResult
     func runParallel<each ID: Hashable & Sendable, each Success: Sendable>(
-        _ tasks: repeat FlowTask<each ID, each Success>
+        _ tasks: repeat FlowTask<each ID, each Success>,
+        onFinished: (@isolated(any) () async -> Void)? = nil
     ) -> Task<Void, Never> {
-        Task {
+        let callback = ParallelCompletionCallback(onFinished)
+
+        return Task {
             await withTaskGroup(of: Void.self) { group in
                 for task in repeat each tasks {
                     group.addTask {
@@ -41,6 +44,8 @@ public extension Executable {
                 }
                 await group.waitForAll()
             }
+
+            await callback.call()
         }
     }
 
@@ -202,5 +207,17 @@ private func awaitHandle(_ handle: Task<Void, Never>) async {
         await handle.value
     } onCancel: {
         handle.cancel()
+    }
+}
+
+private final class ParallelCompletionCallback: @unchecked Sendable {
+    private let callback: (@isolated(any) () async -> Void)?
+
+    init(_ callback: (@isolated(any) () async -> Void)?) {
+        self.callback = callback
+    }
+
+    func call() async {
+        await callback?()
     }
 }
