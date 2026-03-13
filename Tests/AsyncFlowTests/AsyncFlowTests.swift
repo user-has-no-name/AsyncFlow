@@ -1,277 +1,505 @@
-@testable import AsyncFlow
+import AsyncFlow
+import AsyncFlowTestUtilities
 import Foundation
 import Testing
 
-private enum TestError: Error, Equatable {
+@Suite
+struct TaskExecutorTests {
+
+    @Test
+    func runSequential_doesNotStartSecondUntilFirstCompletes() async {
+        let executor = TaskExecutor()
+        let gate = Gate()
+        let tracker = StartTracker()
+        let firstProbe = TaskExecutionProbe<Int>(timeoutSeconds: 2)
+        let secondProbe = TaskExecutionProbe<Int>(timeoutSeconds: 2)
+
+        let firstTask = makeTask(id: "first", probe: firstProbe) {
+            await tracker.markFirst()
+            await gate.wait()
+            return 1
+        }
+
+        let secondTask = makeTask(id: "second", probe: secondProbe) {
+            await tracker.markSecond()
+            return 2
+        }
+
+        let handle = executor.runSequential(firstTask, secondTask)
+
+        let firstStarted = await waitUntil {
+            await tracker.hasStartedFirst()
+        }
+        #expect(firstStarted)
+
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let secondStartedEarly = await tracker.hasStartedSecond()
+        #expect(!secondStartedEarly)
+
+        await gate.open()
+
+        let firstOutcome = await firstProbe.wait()
+        let secondOutcome = await secondProbe.wait()
+        await handle.value
+
+        if case let .success(first) = firstOutcome {
+            #expect(first == 1)
+        } else {
+            #expect(false)
+        }
+
+        if case let .success(second) = secondOutcome {
+            #expect(second == 2)
+        } else {
+            #expect(false)
+        }
+    }
+
+    @Test
+    func runParallel_runsConcurrently() async {
+        let executor = TaskExecutor()
+        let barrier = Barrier(target: 2)
+        let tracker = StartTracker()
+        let firstProbe = TaskExecutionProbe<Int>(timeoutSeconds: 2)
+        let secondProbe = TaskExecutionProbe<Int>(timeoutSeconds: 2)
+
+        let firstTask = makeTask(id: "first", probe: firstProbe) {
+            await tracker.markFirst()
+            await barrier.arrive()
+            return 1
+        }
+
+        let secondTask = makeTask(id: "second", probe: secondProbe) {
+            await tracker.markSecond()
+            await barrier.arrive()
+            return 2
+        }
+
+        let handle = executor.runParallel(firstTask, secondTask)
+
+        let firstStarted = await waitUntil {
+            await tracker.hasStartedFirst()
+        }
+        let secondStarted = await waitUntil {
+            await tracker.hasStartedSecond()
+        }
+        #expect(firstStarted)
+        #expect(secondStarted)
+
+        let firstOutcome = await firstProbe.wait()
+        let secondOutcome = await secondProbe.wait()
+        await handle.value
+
+        if case let .success(first) = firstOutcome {
+            #expect(first == 1)
+        } else {
+            #expect(false)
+        }
+
+        if case let .success(second) = secondOutcome {
+            #expect(second == 2)
+        } else {
+            #expect(false)
+        }
+    }
+
+    @Test
+    func run_reportsFailure() async {
+        let executor = TaskExecutor()
+        let probe = TaskExecutionProbe<Int>(timeoutSeconds: 1)
+
+        let task = makeTask(probe: probe) {
+            throw TestError.boom
+        }
+
+        let handle = executor.run(task)
+        let outcome = await probe.wait()
+        await handle.value
+
+        let isTestError = (outcome.error as? TestError) != nil
+        #expect(isTestError)
+    }
+
+    @Test
+    func cancelAll_cancelsRunningTask() async {
+        let executor = TaskExecutor()
+        let gate = Gate()
+        let tracker = StartTracker()
+        let probe = TaskExecutionProbe<Int>(timeoutSeconds: 2)
+
+        let task = makeTask(id: "task", probe: probe) {
+            await tracker.markFirst()
+            await gate.wait()
+            return 1
+        }
+
+        let handle = executor.run(task)
+
+        let started = await waitUntil {
+            await tracker.hasStartedFirst()
+        }
+        #expect(started)
+
+        executor.cancelAll()
+        await gate.open()
+
+        let outcome = await probe.wait()
+        await handle.value
+
+        if case .cancelled = outcome {
+            #expect(true)
+        } else {
+            #expect(false)
+        }
+    }
+
+    @Test
+    func cancel_id_cancelsOnlyTarget() async {
+        let executor = TaskExecutor()
+        let gate = Gate()
+        let tracker = StartTracker()
+        let blockedProbe = TaskExecutionProbe<Int>(timeoutSeconds: 2)
+        let quickProbe = TaskExecutionProbe<Int>(timeoutSeconds: 2)
+
+        let blockedTask = makeTask(id: "blocked", probe: blockedProbe) {
+            await tracker.markFirst()
+            await gate.wait()
+            return 1
+        }
+
+        let blockedHandle = executor.run(blockedTask)
+
+        let started = await waitUntil {
+            await tracker.hasStartedFirst()
+        }
+        #expect(started)
+
+        let quickTask = makeTask(id: "quick", probe: quickProbe) {
+            2
+        }
+
+        let quickHandle = executor.run(quickTask)
+
+        executor.cancel(id: "blocked")
+        await gate.open()
+
+        let blockedOutcome = await blockedProbe.wait()
+        let quickOutcome = await quickProbe.wait()
+        await blockedHandle.value
+        await quickHandle.value
+
+        if case .cancelled = blockedOutcome {
+            #expect(true)
+        } else {
+            #expect(false)
+        }
+
+        if case let .success(value) = quickOutcome {
+            #expect(value == 2)
+        } else {
+            #expect(false)
+        }
+    }
+
+    @Test
+    func duplicateId_cancelAndReplace_cancelsPrevious() async {
+        let executor = TaskExecutor()
+        let gate = Gate()
+        let tracker = StartTracker()
+        let firstProbe = TaskExecutionProbe<Int>(timeoutSeconds: 2)
+        let secondProbe = TaskExecutionProbe<Int>(timeoutSeconds: 2)
+
+        let firstTask = makeTask(id: "dup", policy: .cancelAndReplace, probe: firstProbe) {
+            await tracker.markFirst()
+            await gate.wait()
+            return 1
+        }
+
+        let firstHandle = executor.run(firstTask)
+
+        let started = await waitUntil {
+            await tracker.hasStartedFirst()
+        }
+        #expect(started)
+
+        let secondTask = makeTask(id: "dup", policy: .cancelAndReplace, probe: secondProbe) {
+            2
+        }
+
+        let secondHandle = executor.run(secondTask)
+
+        await gate.open()
+
+        let firstOutcome = await firstProbe.wait()
+        let secondOutcome = await secondProbe.wait()
+        await firstHandle.value
+        await secondHandle.value
+
+        if case .cancelled = firstOutcome {
+            #expect(true)
+        } else {
+            #expect(false)
+        }
+
+        if case let .success(value) = secondOutcome {
+            #expect(value == 2)
+        } else {
+            #expect(false)
+        }
+    }
+}
+
+@Suite
+struct TasksBagTests {
+
+    @Test
+    func store_newId_returnsStoredWithoutOldEntry() {
+        let bag = TasksBag()
+        let entry = TaskEntry()
+
+        let decision = bag.store(
+            id: "id",
+            policy: .cancelAndReplace,
+            entry: entry
+        )
+
+        if case let .stored(old) = decision {
+            #expect(old == nil)
+        } else {
+            #expect(false)
+        }
+    }
+
+    @Test
+    func store_duplicate_ignoreNew_returnsIgnored() {
+        let bag = TasksBag()
+        let first = TaskEntry()
+        _ = bag.store(id: "id", policy: .cancelAndReplace, entry: first)
+
+        let second = TaskEntry()
+        let decision = bag.store(id: "id", policy: .ignoreNew, entry: second)
+
+        if case .ignoredNew = decision {
+            #expect(true)
+        } else {
+            #expect(false)
+        }
+    }
+
+    @Test
+    func store_duplicate_cancelAndReplace_returnsOldEntry() {
+        let bag = TasksBag()
+        let first = TaskEntry()
+        _ = bag.store(id: "id", policy: .cancelAndReplace, entry: first)
+
+        let second = TaskEntry()
+        let decision = bag.store(id: "id", policy: .cancelAndReplace, entry: second)
+
+        if case let .stored(old) = decision {
+            #expect(old === first)
+        } else {
+            #expect(Bool(false))
+        }
+    }
+
+    @Test
+    func cancel_cancelsEntryAndRemovesFromBag() {
+        let bag = TasksBag()
+        let entry = TaskEntry()
+        _ = bag.store(id: "id", policy: .cancelAndReplace, entry: entry)
+
+        bag.cancel("id")
+        #expect(entry.isCancelled)
+
+        let replacement = TaskEntry()
+        let decision = bag.store(id: "id", policy: .cancelAndReplace, entry: replacement)
+
+        if case let .stored(old) = decision {
+            #expect(old == nil)
+        } else {
+            #expect(false)
+        }
+    }
+
+    @Test
+    func cancelAll_cancelsEntriesAndClearsBag() {
+        let bag = TasksBag()
+        let first = TaskEntry()
+        let second = TaskEntry()
+        _ = bag.store(id: "a", policy: .cancelAndReplace, entry: first)
+        _ = bag.store(id: "b", policy: .cancelAndReplace, entry: second)
+
+        bag.cancelAll()
+
+        #expect(first.isCancelled)
+        #expect(second.isCancelled)
+
+        let replacement = TaskEntry()
+        let decision = bag.store(id: "a", policy: .cancelAndReplace, entry: replacement)
+
+        if case let .stored(old) = decision {
+            #expect(old == nil)
+        } else {
+            #expect(false)
+        }
+    }
+}
+
+@Suite
+struct TaskEntryTests {
+
+    @Test
+    func cancelIfActive_setsCancelledFlag() {
+        let entry = TaskEntry()
+        #expect(entry.cancelIfActive())
+        #expect(entry.isCancelled)
+    }
+
+    @Test
+    func markFinished_preventsCancellation() {
+        let entry = TaskEntry()
+        #expect(entry.markFinishedIfActive())
+        #expect(!entry.cancelIfActive())
+        #expect(!entry.isCancelled)
+    }
+
+    @Test
+    func notifyCancellationOnce_runsOnce() {
+        let entry = TaskEntry()
+        var callCount = 0
+
+        entry.notifyCancellationOnce { callCount += 1 }
+        entry.notifyCancellationOnce { callCount += 1 }
+
+        #expect(callCount == 1)
+    }
+}
+
+private enum TestError: Error {
     case boom
 }
 
-private final class EventCollector: @unchecked Sendable {
-    private let lock = NSLock()
-    private var events: [String] = []
+private actor Gate {
+    private var isOpen = false
+    private var continuation: CheckedContinuation<Void, Never>?
 
-    func record(_ event: String) {
-        lock.lock()
-        events.append(event)
-        lock.unlock()
-    }
-
-    func snapshot() -> [String] {
-        lock.lock()
-        let copy = events
-        lock.unlock()
-        return copy
-    }
-
-    func count() -> Int {
-        lock.lock()
-        let count = events.count
-        lock.unlock()
-        return count
-    }
-
-    func wait(for count: Int, timeoutSeconds: TimeInterval = 1.0) async -> [String] {
-        let deadline = Date().addingTimeInterval(timeoutSeconds)
-        while Date() < deadline {
-            if self.count() >= count {
-                return snapshot()
-            }
-            try? await Task.sleep(nanoseconds: 10_000_000) // 10ms
+    func wait() async {
+        if isOpen {
+            return
         }
-        return snapshot()
+
+        await withCheckedContinuation { continuation in
+            if isOpen {
+                continuation.resume()
+                return
+            }
+
+            self.continuation = continuation
+        }
+    }
+
+    func open() {
+        guard !isOpen else {
+            return
+        }
+
+        isOpen = true
+        continuation?.resume()
+        continuation = nil
     }
 }
 
-private final class Flag: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = false
+private actor StartTracker {
+    private var startedFirst = false
+    private var startedSecond = false
 
-    func setTrue() {
-        lock.lock()
-        value = true
-        lock.unlock()
+    func markFirst() {
+        startedFirst = true
     }
 
-    func get() -> Bool {
-        lock.lock()
-        let current = value
-        lock.unlock()
-        return current
+    func markSecond() {
+        startedSecond = true
+    }
+
+    func hasStartedFirst() -> Bool {
+        startedFirst
+    }
+
+    func hasStartedSecond() -> Bool {
+        startedSecond
     }
 }
 
-struct TaskExecutorTests {
+private actor Barrier {
+    private let target: Int
+    private var count = 0
+    private var waiters: [CheckedContinuation<Void, Never>] = []
 
-    @Test func runDeliversResult() async {
-        let executor = TaskExecutor()
-        let events = EventCollector()
+    init(target: Int) {
+        self.target = target
+    }
 
-        executor.run(
-            {
-                42
-            },
-            id: "result",
-            onResult: { value in
-                events.record("result:\(value)")
-            },
-            onError: { _ in
-                events.record("error")
-            },
-            onCancellationError: {
-                events.record("cancel")
+    func arrive() async {
+        count += 1
+        if count >= target {
+            let current = waiters
+            waiters.removeAll()
+            current.forEach { $0.resume() }
+            return
+        }
+
+        await withCheckedContinuation { continuation in
+            if count >= target {
+                continuation.resume()
+            } else {
+                waiters.append(continuation)
             }
-        )
+        }
+    }
+}
 
-        let recorded = await events.wait(for: 1)
-        #expect(recorded == ["result:42"])
+private func waitUntil(
+    timeoutSeconds: TimeInterval = 1.0,
+    pollIntervalNanos: UInt64 = 5_000_000,
+    _ condition: @escaping @Sendable () async -> Bool
+) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeoutSeconds)
+    while Date() < deadline {
+        if await condition() {
+            return true
+        }
+
+        try? await Task.sleep(nanoseconds: pollIntervalNanos)
     }
 
-    @Test func cancelBeforeStartTriggersCancellation() async {
-        let executor = TaskExecutor()
-        let events = EventCollector()
+    return await condition()
+}
 
-        executor.run(
-            {
-                try await Task.sleep(nanoseconds: 200_000_000)
-                return 1
-            },
-            id: "cancel-immediate",
-            onResult: { _ in
-                events.record("result")
-            },
-            onError: { _ in
-                events.record("error")
-            },
-            onCancellationError: {
-                events.record("cancel")
-            }
-        )
+private func makeTask<ID: Hashable & Sendable, Success: Sendable>(
+    id: ID,
+    policy: DuplicateIDPolicy = .cancelAndReplace,
+    probe: TaskExecutionProbe<Success>,
+    work: @Sendable @escaping () async throws -> Success
+) -> FlowTask<ID, Success> {
+    FlowTask(
+        id: id,
+        policy: policy,
+        work: work,
+        onResult: probe.onResult,
+        onError: probe.onError,
+        onCancellation: probe.onCancellation
+    )
+}
 
-        executor.cancel(id: "cancel-immediate")
-
-        let recorded = await events.wait(for: 1)
-        #expect(recorded == ["cancel"])
-    }
-
-    @Test func cancelAllCancelsMultiple() async {
-        let executor = TaskExecutor()
-        let events = EventCollector()
-
-        executor.run(
-            {
-                try await Task.sleep(nanoseconds: 300_000_000)
-                return 1
-            },
-            id: "a",
-            onResult: { _ in events.record("result-a") },
-            onError: { _ in events.record("error-a") },
-            onCancellationError: { events.record("cancel-a") }
-        )
-
-        executor.run(
-            {
-                try await Task.sleep(nanoseconds: 300_000_000)
-                return 2
-            },
-            id: "b",
-            onResult: { _ in events.record("result-b") },
-            onError: { _ in events.record("error-b") },
-            onCancellationError: { events.record("cancel-b") }
-        )
-
-        executor.cancelAll()
-
-        let recorded = await events.wait(for: 2)
-        #expect(Set(recorded) == Set(["cancel-a", "cancel-b"]))
-    }
-
-    @Test func cancelAndReplaceCancelsOldAndDeliversNew() async {
-        let executor = TaskExecutor()
-        let events = EventCollector()
-
-        executor.run(
-            {
-                try await Task.sleep(nanoseconds: 300_000_000)
-                return 1
-            },
-            id: "replace",
-            policy: .cancelAndReplace,
-            onResult: { _ in events.record("old-result") },
-            onError: { _ in events.record("old-error") },
-            onCancellationError: { events.record("old-cancel") }
-        )
-
-        executor.run(
-            {
-                2
-            },
-            id: "replace",
-            policy: .cancelAndReplace,
-            onResult: { _ in events.record("new-result") },
-            onError: { _ in events.record("new-error") },
-            onCancellationError: { events.record("new-cancel") }
-        )
-
-        let recorded = await events.wait(for: 2)
-        #expect(Set(recorded) == Set(["old-cancel", "new-result"]))
-    }
-
-    @Test func ignoreNewDoesNotRunNew() async {
-        let executor = TaskExecutor()
-        let events = EventCollector()
-        let ranNew = Flag()
-
-        executor.run(
-            {
-                try await Task.sleep(nanoseconds: 100_000_000)
-                return 1
-            },
-            id: "ignore",
-            policy: .cancelAndReplace,
-            onResult: { _ in events.record("old-result") },
-            onError: { _ in events.record("old-error") },
-            onCancellationError: { events.record("old-cancel") }
-        )
-
-        executor.run(
-            {
-                ranNew.setTrue()
-                return 2
-            },
-            id: "ignore",
-            policy: .ignoreNew,
-            onResult: { _ in events.record("new-result") },
-            onError: { _ in events.record("new-error") },
-            onCancellationError: { events.record("new-cancel") }
-        )
-
-        let recorded = await events.wait(for: 1)
-        #expect(recorded == ["old-result"])
-        #expect(ranNew.get() == false)
-    }
-
-    @Test func errorNotCancelledCallsOnError() async {
-        let executor = TaskExecutor()
-        let events = EventCollector()
-
-        executor.run(
-            {
-                throw TestError.boom
-            },
-            id: "error",
-            onResult: { _ in events.record("result") },
-            onError: { _ in events.record("error") },
-            onCancellationError: { events.record("cancel") }
-        )
-
-        let recorded = await events.wait(for: 1)
-        #expect(recorded == ["error"])
-    }
-
-    @Test func errorAfterCancelRoutesToCancellation() async {
-        let executor = TaskExecutor()
-        let events = EventCollector()
-
-        executor.run(
-            {
-                for _ in 0..<50 {
-                    await Task.yield()
-                }
-                throw TestError.boom
-            },
-            id: "cancel-then-error",
-            onResult: { _ in events.record("result") },
-            onError: { _ in events.record("error") },
-            onCancellationError: { events.record("cancel") }
-        )
-
-        executor.cancel(id: "cancel-then-error")
-
-        let recorded = await events.wait(for: 1)
-        #expect(recorded == ["cancel"])
-    }
-
-    @Test func onResultNilStillFinishesAndCancelAfterwardsDoesNothing() async {
-        let executor = TaskExecutor()
-        let events = EventCollector()
-        let done = EventCollector()
-
-        executor.run(
-            {
-                done.record("done")
-                return 7
-            },
-            id: "no-result",
-            onResult: nil,
-            onError: { _ in events.record("error") },
-            onCancellationError: { events.record("cancel") }
-        )
-
-        _ = await done.wait(for: 1)
-        try? await Task.sleep(nanoseconds: 50_000_000)
-        executor.cancel(id: "no-result")
-
-        let recorded = await events.wait(for: 1, timeoutSeconds: 0.2)
-        #expect(recorded.isEmpty)
-    }
+private func makeTask<Success: Sendable>(
+    policy: DuplicateIDPolicy = .cancelAndReplace,
+    probe: TaskExecutionProbe<Success>,
+    work: @Sendable @escaping () async throws -> Success
+) -> FlowTask<UUID, Success> {
+    makeTask(
+        id: UUID(),
+        policy: policy,
+        probe: probe,
+        work: work
+    )
 }

@@ -7,64 +7,45 @@
 
 import Foundation
 
-public protocol Executable {
+public protocol Executable: Sendable {
 
-    func runSequential<each TaskResult, ID: Hashable & Sendable>(
-        _ tasks: repeat @Sendable @escaping () async throws -> each TaskResult,
-        id: ID,
-        policy: DuplicateIDPolicy,
-        onResult: (@Sendable ((repeat each TaskResult)) async -> Void)?,
-        onError: @Sendable @escaping (Error) -> Void,
-        onCancellationError: (@Sendable () -> Void)?
-    )
-    func runParallel<each TaskResult, ID: Hashable & Sendable>(
-        _ tasks: repeat @Sendable @escaping () async throws -> each TaskResult,
-        id: ID,
-        policy: DuplicateIDPolicy,
-        onResult: (@Sendable ((repeat each TaskResult)) async -> Void)?,
-        onError: @Sendable @escaping (Error) -> Void,
-        onCancellationError: (@Sendable () -> Void)?
-    )
+    @discardableResult
+    func run<ID: Hashable & Sendable, Success: Sendable>(
+        _ task: FlowTask<ID, Success>
+    ) -> Task<Void, Never>
+
     func cancelAll()
     func cancel(id: AnyHashable)
 }
 
 public extension Executable {
-
-    func runSequential<each TaskResult, ID: Hashable & Sendable>(
-        _ tasks: repeat @Sendable @escaping () async throws -> each TaskResult,
-        id: ID = UUID(),
-        policy: DuplicateIDPolicy = .cancelAndReplace,
-        onResult: (@Sendable ((repeat each TaskResult)) async -> Void)? = nil,
-        onError: @Sendable @escaping (Error) -> Void,
-        onCancellationError: (@Sendable () -> Void)? = nil
-    ) {
-        runSequential(
-            repeat each tasks,
-            id: id,
-            policy: policy,
-            onResult: onResult,
-            onError: onError,
-            onCancellationError: onCancellationError
-        )
+    @discardableResult
+    func runSequential<each ID: Hashable & Sendable, each Success: Sendable>(
+        _ tasks: repeat FlowTask<each ID, each Success>
+    ) -> Task<Void, Never> {
+        Task {
+            repeat await awaitHandle(run(each tasks))
+        }
     }
 
-    func runParallel<each TaskResult, ID: Hashable & Sendable>(
-        _ tasks: repeat @Sendable @escaping () async throws -> each TaskResult,
-        id: ID = UUID(),
-        policy: DuplicateIDPolicy = .cancelAndReplace,
-        onResult: (@Sendable ((repeat each TaskResult)) async -> Void)? = nil,
-        onError: @Sendable @escaping (Error) -> Void,
-        onCancellationError: (@Sendable () -> Void)? = nil
-    ) {
-        runParallel(
-            repeat each tasks,
-            id: id,
-            policy: policy,
-            onResult: onResult,
-            onError: onError,
-            onCancellationError: onCancellationError
-        )
+    @discardableResult
+    func runParallel<each ID: Hashable & Sendable, each Success: Sendable>(
+        _ tasks: repeat FlowTask<each ID, each Success>
+    ) -> Task<Void, Never> {
+        Task {
+            await withTaskGroup(of: Void.self) { group in
+                for task in repeat each tasks {
+                    group.addTask {
+                        await runOne(task)
+                    }
+                }
+                await group.waitForAll()
+            }
+        }
+    }
+
+    private func runOne<ID: Hashable & Sendable, Success: Sendable>(_ task: FlowTask<ID, Success>) async {
+        await awaitHandle(run(task))
     }
 }
 
@@ -78,103 +59,55 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
         tasksBag.cancelAll()
     }
 
-    public func runParallel<each TaskResult, ID: Hashable & Sendable>(
-        _ tasks: repeat @Sendable @escaping () async throws -> each TaskResult,
-        id: ID,
-        policy: DuplicateIDPolicy,
-        onResult: (@Sendable ((repeat each TaskResult)) async -> Void)?,
-        onError: @Sendable @escaping (Error) -> Void,
-        onCancellationError: (@Sendable () -> Void)?
-    ) {
-        run(
-            {
-                async let results: (repeat each TaskResult) = (
-                    repeat try (each tasks)()
-                )
-                return try await results
-            },
-            id: id,
-            policy: policy,
-            onResult: onResult,
-            onError: onError,
-            onCancellationError: onCancellationError
-        )
-    }
-
-    public func runSequential<each TaskResult, ID: Hashable & Sendable>(
-        _ tasks: repeat @Sendable @escaping () async throws -> each TaskResult,
-        id: ID,
-        policy: DuplicateIDPolicy,
-        onResult: (@Sendable ((repeat each TaskResult)) async -> Void)?,
-        onError: @Sendable @escaping (Error) -> Void,
-        onCancellationError: (@Sendable () -> Void)?
-    ) {
-        run(
-            {
-                let tasks: (repeat () async throws -> each TaskResult) = (repeat (each tasks))
-                let results: (repeat each TaskResult) = (repeat try await (each tasks)())
-                return results
-            },
-            id: id,
-            policy: policy,
-            onResult: onResult,
-            onError: onError,
-            onCancellationError: onCancellationError
-        )
-    }
-
-    private func run<TaskResult, ID: Hashable & Sendable>(
-        _ task: @Sendable @escaping () async throws -> TaskResult,
-        id: ID,
-        policy: DuplicateIDPolicy,
-        onResult: (@Sendable (TaskResult) async -> Void)?,
-        onError: @Sendable @escaping (Error) -> Void,
-        onCancellationError: (@Sendable () -> Void)?
-    ) {
+    @discardableResult
+    public func run<ID: Hashable & Sendable, Success: Sendable>(
+        _ task: FlowTask<ID, Success>
+    ) -> Task<Void, Never> {
         let entry: TaskEntry = .init()
         let decision: TasksBag.StoreDecision = tasksBag.store(
-            id: id,
-            policy: policy,
+            id: task.id,
+            policy: task.policy,
             entry: entry
         )
 
         switch decision {
         case .ignoredNew:
-            return
+            return Task { }
         case let .stored(oldEntry):
             oldEntry?.cancel()
         }
 
-        let task: Task<Void, Never> = Self.makeTask(
+        let handle: Task<Void, Never> = Self.makeTask(
             tasksBag: tasksBag,
-            id: id,
             entry: entry,
-            task: task,
-            onResult: onResult,
-            onError: onError,
-            onCancellationError: onCancellationError
+            task: task
         )
 
-        entry.setTask(task)
+        entry.setTask(handle)
+        return handle
     }
 
-    private static func makeTask<TaskResult, ID: Hashable & Sendable>(
+    public func cancelAll() {
+        tasksBag.cancelAll()
+    }
+
+    public func cancel(id: AnyHashable) {
+        tasksBag.cancel(id)
+    }
+
+    private static func makeTask<ID: Hashable & Sendable, Success: Sendable>(
         tasksBag: TasksBag,
-        id: ID,
         entry: TaskEntry,
-        task: @Sendable @escaping () async throws -> TaskResult,
-        onResult: (@Sendable (TaskResult) async -> Void)?,
-        onError: @Sendable @escaping (Error) -> Void,
-        onCancellationError: (@Sendable () -> Void)?
+        task: FlowTask<ID, Success>
     ) -> Task<Void, Never> {
         Task<Void, Never> { [tasksBag] in
             defer {
-                tasksBag.remove(id, entry: entry)
+                tasksBag.remove(task.id, entry: entry)
             }
 
             let notifyCancellation: @Sendable () -> Void = {
                 entry.notifyCancellationOnce {
-                    onCancellationError?()
+                    task.onCancellation?()
                 }
             }
 
@@ -205,7 +138,7 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
                     }
                     try Task.checkCancellation()
 
-                    let result: TaskResult = try await task()
+                    let result: Success = try await task.work()
 
                     guard ensureActiveOrNotifyCancellation()
                     else {
@@ -217,13 +150,13 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
                     else {
                         return
                     }
-                    await onResult?(result)
+                    await task.onResult?(result)
                 } catch is CancellationError {
                     notifyCancellation()
                 } catch {
                     guard entry.isCancelled
                     else {
-                        onError(error)
+                        task.onError(error)
                         return
                     }
                     notifyCancellation()
@@ -237,12 +170,19 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
             }
         }
     }
+}
 
-    public func cancelAll() {
-        tasksBag.cancelAll()
+private func awaitHandle(_ handle: Task<Void, Never>) async {
+    guard !Task.isCancelled else {
+        handle.cancel()
+        await handle.value
+        return
     }
 
-    public func cancel(id: AnyHashable) {
-        tasksBag.cancel(id)
+    await withTaskCancellationHandler {
+        await handle.value
+    } onCancel: {
+        handle.cancel()
     }
 }
+

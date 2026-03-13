@@ -12,6 +12,8 @@ package final class TasksBag: @unchecked Sendable {
     private var bag: Dictionary<AnyHashable, TaskEntry> = .init()
     private let lock: NSLock = .init()
 
+    package init() { }
+
     package enum StoreDecision {
         case stored(cancelOld: TaskEntry?)
         case ignoredNew

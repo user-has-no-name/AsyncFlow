@@ -12,6 +12,10 @@ let package = Package(
             name: "AsyncFlow",
             targets: ["AsyncFlow"]
         ),
+        .library(
+            name: "AsyncFlowTestUtilities",
+            targets: ["AsyncFlowTestUtilities"]
+        ),
     ],
     targets: [
         // Targets are the basic building blocks of a package, defining a module or a test suite.
@@ -19,9 +23,13 @@ let package = Package(
         .target(
             name: "AsyncFlow"
         ),
+        .target(
+            name: "AsyncFlowTestUtilities",
+            dependencies: ["AsyncFlow"]
+        ),
         .testTarget(
             name: "AsyncFlowTests",
-            dependencies: ["AsyncFlow"]
+            dependencies: ["AsyncFlow", "AsyncFlowTestUtilities"]
         ),
     ]
 )

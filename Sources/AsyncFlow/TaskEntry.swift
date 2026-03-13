@@ -15,6 +15,8 @@ package final class TaskEntry: @unchecked Sendable {
     private var isFinished: Bool = false
     private var task: Task<Void, Never>?
 
+    package init() { }
+
     package var isCancelled: Bool {
         lock.lock()
         let cancelled: Bool = isCancelledFlag
