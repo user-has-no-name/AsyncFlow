@@ -14,7 +14,7 @@ Each task owns its own:
 - duplicate-ID `policy`
 - async `work`
 - `onResult`
-- `onError`
+- optional `onError`
 - `onCancellation`
 
 ## Basic idea
@@ -191,6 +191,18 @@ handle.cancel()
 ```
 
 If cancellation reaches a `FlowTask`, its `onCancellation` closure is called once.
+
+## Lifecycle logging
+
+`TaskExecutor` emits task lifecycle logs through `OSLog` with:
+
+- task ID
+- start timestamp
+- finish timestamp
+- total duration in milliseconds
+- terminal status (`completed`, `cancelled`, or `failed`)
+
+Tasks ignored because of `.ignoreNew` are also logged.
 
 ## UUID convenience initializer
 

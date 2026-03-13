@@ -52,6 +52,7 @@ public extension Executable {
 public final class TaskExecutor: Executable, @unchecked Sendable {
 
     private let tasksBag: TasksBag = .init()
+    private let lifecycleLogger: TaskLifecycleLogger = .init()
 
     public init() { }
 
@@ -72,6 +73,7 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
 
         switch decision {
         case .ignoredNew:
+            lifecycleLogger.ignored(id: task.id)
             return Task { }
         case let .stored(oldEntry):
             oldEntry?.cancel()
@@ -80,6 +82,7 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
         let handle: Task<Void, Never> = Self.makeTask(
             tasksBag: tasksBag,
             entry: entry,
+            lifecycleLogger: lifecycleLogger,
             task: task
         )
 
@@ -98,10 +101,22 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
     private static func makeTask<ID: Hashable & Sendable, Success: Sendable>(
         tasksBag: TasksBag,
         entry: TaskEntry,
+        lifecycleLogger: TaskLifecycleLogger,
         task: FlowTask<ID, Success>
     ) -> Task<Void, Never> {
         Task<Void, Never> { [tasksBag] in
+            let startedAt = Date()
+            var outcome: TaskLifecycleOutcome = .cancelled
+
+            lifecycleLogger.started(id: task.id, startedAt: startedAt)
+
             defer {
+                lifecycleLogger.finished(
+                    id: task.id,
+                    startedAt: startedAt,
+                    finishedAt: Date(),
+                    outcome: outcome
+                )
                 tasksBag.remove(task.id, entry: entry)
             }
 
@@ -150,15 +165,19 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
                     else {
                         return
                     }
+                    outcome = .succeeded
                     await task.onResult?(result)
                 } catch is CancellationError {
+                    outcome = .cancelled
                     notifyCancellation()
                 } catch {
                     guard entry.isCancelled
                     else {
-                        task.onError(error)
+                        outcome = .failed(error)
+                        task.onError?(error)
                         return
                     }
+                    outcome = .cancelled
                     notifyCancellation()
                 }
             } onCancel: {
@@ -185,4 +204,3 @@ private func awaitHandle(_ handle: Task<Void, Never>) async {
         handle.cancel()
     }
 }
-
