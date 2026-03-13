@@ -139,6 +139,35 @@ executor.runParallel(
 
 `runParallel(_:)` creates real concurrent child tasks. Each child is still tracked by the executor and keeps its own callbacks and cancellation behavior.
 
+If you need one hook for the whole group, use `onFinished`. It runs after every child task and callback has finished, including group cancellation:
+
+```swift
+executor.runParallel(
+    firstTask,
+    secondTask,
+    onFinished: viewModel.stopLoading
+)
+```
+
+`FlowTask` also accepts `@MainActor` work and result callbacks, so you can submit tasks directly from UI-facing types without wrapping them yourself:
+
+```swift
+executor.runParallel(
+    FlowTask(
+        id: "profile",
+        work: viewModel.loadProfile,
+        onResult: viewModel.showProfile
+    ),
+    FlowTask(
+        id: "feed",
+        work: viewModel.loadFeed,
+        onResult: viewModel.showFeed
+    )
+)
+```
+
+Main-actor tasks can still interleave when they suspend, but they do not bypass main-actor serialization. Keep expensive work off the main actor whenever possible.
+
 ## Duplicate ID policy
 
 If you submit another task with the same ID while one is still active, `DuplicateIDPolicy` decides what happens:

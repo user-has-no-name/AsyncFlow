@@ -104,6 +104,124 @@ struct TaskExecutorTests {
     }
 
     @Test
+    func runParallel_onFinishedRunsAfterTaskCallbacks() async {
+        let executor = TaskExecutor()
+        let events = EventRecorder()
+
+        let firstTask = FlowTask(
+            id: "first",
+            work: { 1 },
+            onResult: { value in
+                await events.append("result-\(value)")
+            }
+        )
+
+        let secondTask = FlowTask(
+            id: "second",
+            work: { 2 },
+            onResult: { value in
+                await events.append("result-\(value)")
+            }
+        )
+
+        let handle = executor.runParallel(firstTask, secondTask) {
+            await events.append("finished")
+        }
+        await handle.value
+
+        let recordedEvents = await events.snapshot()
+        #expect(recordedEvents.count == 3)
+        #expect(recordedEvents.last == "finished")
+        #expect(Set(recordedEvents) == ["result-1", "result-2", "finished"])
+    }
+
+    @Test
+    func runParallel_onFinishedRunsWhenGroupIsCancelled() async {
+        let executor = TaskExecutor()
+        let gate = Gate()
+        let tracker = StartTracker()
+        let probe = TaskExecutionProbe<Int>(timeoutSeconds: 2)
+        let events = EventRecorder()
+
+        let task = makeTask(id: "task", probe: probe) {
+            await tracker.markFirst()
+            await gate.wait()
+            return 1
+        }
+
+        let handle = executor.runParallel(task) {
+            await events.append("finished")
+        }
+
+        let started = await waitUntil {
+            await tracker.hasStartedFirst()
+        }
+        #expect(started)
+
+        handle.cancel()
+        await gate.open()
+
+        let outcome = await probe.wait()
+        await handle.value
+
+        if case .cancelled = outcome {
+            #expect(true)
+        } else {
+            #expect(false)
+        }
+
+        let recordedEvents = await events.snapshot()
+        #expect(recordedEvents == ["finished"])
+    }
+
+    @Test
+    func runParallel_acceptsMainActorWorkAndCallbacks() async {
+        let executor = TaskExecutor()
+        let barrier = Barrier(target: 2)
+        let recorder = await MainActorRecorder<Int>()
+
+        @MainActor
+        func firstWork() async throws -> Int {
+            await barrier.arrive()
+            return 1
+        }
+
+        @MainActor
+        func secondWork() async throws -> Int {
+            await barrier.arrive()
+            return 2
+        }
+
+        @MainActor
+        func record(_ value: Int) {
+            recorder.append(value)
+        }
+
+        @MainActor
+        func recordFinished() {
+            recorder.append(99)
+        }
+
+        let firstTask = FlowTask(
+            id: "first",
+            work: firstWork,
+            onResult: record
+        )
+
+        let secondTask = FlowTask(
+            id: "second",
+            work: secondWork,
+            onResult: record
+        )
+
+        let handle = executor.runParallel(firstTask, secondTask, onFinished: recordFinished)
+        await handle.value
+
+        let values = await recorder.values().sorted()
+        #expect(values == [1, 2, 99])
+    }
+
+    @Test
     func run_reportsFailure() async {
         let executor = TaskExecutor()
         let probe = TaskExecutionProbe<Int>(timeoutSeconds: 1)
@@ -455,6 +573,31 @@ private actor Barrier {
                 waiters.append(continuation)
             }
         }
+    }
+}
+
+private actor EventRecorder {
+    private var events: [String] = []
+
+    func append(_ event: String) {
+        events.append(event)
+    }
+
+    func snapshot() -> [String] {
+        events
+    }
+}
+
+@MainActor
+private final class MainActorRecorder<Value> {
+    private var storedValues: [Value] = []
+
+    func append(_ value: Value) {
+        storedValues.append(value)
+    }
+
+    func values() -> [Value] {
+        storedValues
     }
 }
 
