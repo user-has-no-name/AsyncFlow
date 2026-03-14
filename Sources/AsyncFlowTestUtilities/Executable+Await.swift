@@ -15,7 +15,7 @@ public extension Executable {
         policy: DuplicateIDPolicy = .cancelAndReplace,
         timeoutSeconds: TimeInterval? = 1.0,
         cancelOnTimeout: Bool = true,
-        work: @Sendable @escaping () async throws -> Success
+        work: @isolated(any) @escaping () async throws -> Success
     ) async -> TaskExecutionOutcome<Success> {
         let awaiter = OutcomeAwaiter<Success>()
 
@@ -28,7 +28,7 @@ public extension Executable {
                 cancel(id: AnyHashable(id))
             },
             start: {
-                let task = FlowTask(
+                _ = run(FlowTask(
                     id: id,
                     policy: policy,
                     work: work,
@@ -41,8 +41,7 @@ public extension Executable {
                     onCancellation: {
                         _ = awaiter.resolve(.cancelled)
                     }
-                )
-                _ = run(task)
+                ))
             }
         )
     }
@@ -51,7 +50,7 @@ public extension Executable {
         policy: DuplicateIDPolicy = .cancelAndReplace,
         timeoutSeconds: TimeInterval? = 1.0,
         cancelOnTimeout: Bool = true,
-        work: @Sendable @escaping () async throws -> Success
+        work: @isolated(any) @escaping () async throws -> Success
     ) async -> TaskExecutionOutcome<Success> {
         await awaitTask(
             id: UUID(),
