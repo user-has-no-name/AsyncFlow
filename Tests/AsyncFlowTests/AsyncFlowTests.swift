@@ -104,6 +104,87 @@ struct TaskExecutorTests {
     }
 
     @Test
+    func runSequential_arrayOverload_preservesOrder() async {
+        let executor = TaskExecutor()
+        let gate = Gate()
+        let events = EventRecorder()
+
+        let firstTask = FlowTask(
+            id: "first",
+            work: {
+                await events.append("first-start")
+                await gate.wait()
+                return 1
+            },
+            onResult: { _ in
+                await events.append("first-end")
+            }
+        )
+
+        let secondTask = FlowTask(
+            id: "second",
+            work: {
+                await events.append("second-start")
+                return 2
+            },
+            onResult: { _ in
+                await events.append("second-end")
+            }
+        )
+
+        let handle = executor.runSequential([firstTask, secondTask])
+
+        try? await Task.sleep(nanoseconds: 50_000_000)
+        let earlyEvents = await events.snapshot()
+        #expect(earlyEvents == ["first-start"])
+
+        await gate.open()
+        await handle.value
+
+        let recordedEvents = await events.snapshot()
+        #expect(recordedEvents == ["first-start", "first-end", "second-start", "second-end"])
+    }
+
+    @Test
+    func runParallel_arrayOverload_acceptsFactoryTasks() async {
+        enum FactoryTaskID: Hashable, Sendable {
+            case first
+            case second
+        }
+
+        struct Factory: FlowTaskFactory {
+            let events: EventRecorder
+
+            func create(using taskID: FactoryTaskID) -> FlowTask<FactoryTaskID> {
+                FlowTask(
+                    id: taskID,
+                    work: {
+                        switch taskID {
+                        case .first:
+                            return "first"
+                        case .second:
+                            return "second"
+                        }
+                    },
+                    onResult: { value in
+                        await events.append(value)
+                    }
+                )
+            }
+        }
+
+        let executor = TaskExecutor()
+        let events = EventRecorder()
+        let factory = Factory(events: events)
+
+        let handle = executor.runParallel(factory.create(using: .first, .second))
+        await handle.value
+
+        let recordedEvents = await events.snapshot()
+        #expect(Set(recordedEvents) == ["first", "second"])
+    }
+
+    @Test
     func runParallel_onFinishedRunsAfterTaskCallbacks() async {
         let executor = TaskExecutor()
         let events = EventRecorder()
@@ -744,7 +825,7 @@ private func makeTask<ID: Hashable & Sendable, Success: Sendable>(
     policy: DuplicateIDPolicy = .cancelAndReplace,
     probe: TaskExecutionProbe<Success>,
     work: @isolated(any) @escaping () async throws -> Success
-) -> FlowTask<ID, Success> {
+) -> FlowTask<ID> {
     FlowTask(
         id: id,
         policy: policy,
@@ -759,7 +840,7 @@ private func makeTask<Success: Sendable>(
     policy: DuplicateIDPolicy = .cancelAndReplace,
     probe: TaskExecutionProbe<Success>,
     work: @isolated(any) @escaping () async throws -> Success
-) -> FlowTask<UUID, Success> {
+) -> FlowTask<UUID> {
     makeTask(
         id: UUID(),
         policy: policy,

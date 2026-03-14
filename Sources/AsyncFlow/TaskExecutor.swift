@@ -10,8 +10,8 @@ import Foundation
 public protocol Executable: Sendable {
 
     @discardableResult
-    func run<ID: Hashable & Sendable, Success: Sendable>(
-        _ task: FlowTask<ID, Success>
+    func run<ID: Hashable & Sendable>(
+        _ task: FlowTask<ID>
     ) -> Task<Void, Never>
 
     func cancelAll()
@@ -20,8 +20,8 @@ public protocol Executable: Sendable {
 
 public extension Executable {
     @discardableResult
-    func runSequential<each ID: Hashable & Sendable, each Success: Sendable>(
-        _ tasks: repeat FlowTask<each ID, each Success>
+    func runSequential<each ID: Hashable & Sendable>(
+        _ tasks: repeat FlowTask<each ID>
     ) -> Task<Void, Never> {
         let taskBoxes = (repeat TaskTransferBox(each tasks))
 
@@ -31,8 +31,21 @@ public extension Executable {
     }
 
     @discardableResult
-    func runParallel<each ID: Hashable & Sendable, each Success: Sendable>(
-        _ tasks: repeat FlowTask<each ID, each Success>,
+    func runSequential<ID: Hashable & Sendable>(
+        _ tasks: [FlowTask<ID>]
+    ) -> Task<Void, Never> {
+        let taskBoxes = tasks.map(TaskTransferBox.init)
+
+        return Task {
+            for taskBox in taskBoxes {
+                await awaitHandle(run(taskBox.take()))
+            }
+        }
+    }
+
+    @discardableResult
+    func runParallel<each ID: Hashable & Sendable>(
+        _ tasks: repeat FlowTask<each ID>,
         onFinished: (@isolated(any) () async -> Void)? = nil
     ) -> Task<Void, Never> {
         let callback = ParallelCompletionCallback(onFinished)
@@ -52,8 +65,30 @@ public extension Executable {
         }
     }
 
-    private func runOne<ID: Hashable & Sendable, Success: Sendable>(
-        _ task: FlowTask<ID, Success>
+    @discardableResult
+    func runParallel<ID: Hashable & Sendable>(
+        _ tasks: [FlowTask<ID>],
+        onFinished: (@isolated(any) () async -> Void)? = nil
+    ) -> Task<Void, Never> {
+        let callback = ParallelCompletionCallback(onFinished)
+        let taskBoxes = tasks.map(TaskTransferBox.init)
+
+        return Task {
+            await withTaskGroup(of: Void.self) { group in
+                for taskBox in taskBoxes {
+                    group.addTask {
+                        await runOne(taskBox.take())
+                    }
+                }
+                await group.waitForAll()
+            }
+
+            await callback.call()
+        }
+    }
+
+    private func runOne<ID: Hashable & Sendable>(
+        _ task: FlowTask<ID>
     ) async {
         await awaitHandle(run(task))
     }
@@ -71,8 +106,8 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
     }
 
     @discardableResult
-    public func run<ID: Hashable & Sendable, Success: Sendable>(
-        _ task: FlowTask<ID, Success>
+    public func run<ID: Hashable & Sendable>(
+        _ task: FlowTask<ID>
     ) -> Task<Void, Never> {
         let entry: TaskEntry = .init()
         let decision: TasksBag.StoreDecision = tasksBag.store(
@@ -108,11 +143,11 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
         tasksBag.cancel(id)
     }
 
-    private static func makeTask<ID: Hashable & Sendable, Success: Sendable>(
+    private static func makeTask<ID: Hashable & Sendable>(
         tasksBag: TasksBag,
         entry: TaskEntry,
         lifecycleLogger: TaskLifecycleLogger,
-        taskBox: TaskTransferBox<ID, Success>
+        taskBox: TaskTransferBox<ID>
     ) -> Task<Void, Never> {
         Task<Void, Never> { [tasksBag] in
             let task = taskBox.take()
@@ -163,7 +198,7 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
                     }
                     try Task.checkCancellation()
 
-                    let result: Success = try await task.work()
+                    let result: ErasedFlowTaskResult = try await task.work()
 
                     guard await ensureActiveOrNotifyCancellation()
                     else {
@@ -263,15 +298,15 @@ private final class AsyncCallbackOnce: @unchecked Sendable {
     }
 }
 
-private final class TaskTransferBox<ID: Hashable & Sendable, Success: Sendable>: @unchecked Sendable {
+private final class TaskTransferBox<ID: Hashable & Sendable>: @unchecked Sendable {
     private let lock = NSLock()
-    private var task: FlowTask<ID, Success>?
+    private var task: FlowTask<ID>?
 
-    init(_ task: FlowTask<ID, Success>) {
+    init(_ task: FlowTask<ID>) {
         self.task = task
     }
 
-    func take() -> FlowTask<ID, Success> {
+    func take() -> FlowTask<ID> {
         lock.lock()
         defer {
             lock.unlock()
