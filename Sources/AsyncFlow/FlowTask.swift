@@ -7,16 +7,17 @@
 
 import Foundation
 
-public struct FlowTask<ID: Hashable & Sendable, Success: Sendable> {
+public struct FlowTask<ID: Hashable & Sendable> {
 
     public let id: ID
     public let policy: DuplicateIDPolicy
-    public let work: @isolated(any) () async throws -> Success
-    public let onResult: (@isolated(any) (Success) async -> Void)?
-    public let onError: (@isolated(any) (Error) async -> Void)?
-    public let onCancellation: (@isolated(any) () async -> Void)?
 
-    public init(
+    let work: @isolated(any) () async throws -> ErasedFlowTaskResult
+    let onResult: (@isolated(any) (ErasedFlowTaskResult) async -> Void)?
+    let onError: (@isolated(any) (Error) async -> Void)?
+    let onCancellation: (@isolated(any) () async -> Void)?
+
+    public init<Success: Sendable>(
         id: ID,
         policy: DuplicateIDPolicy = .cancelAndReplace,
         work: @isolated(any) @escaping () async throws -> Success,
@@ -26,8 +27,16 @@ public struct FlowTask<ID: Hashable & Sendable, Success: Sendable> {
     ) {
         self.id = id
         self.policy = policy
-        self.work = work
-        self.onResult = onResult
+        self.work = {
+            ErasedFlowTaskResult(try await work())
+        }
+        if let onResult {
+            self.onResult = { result in
+                await onResult(result.value(as: Success.self))
+            }
+        } else {
+            self.onResult = nil
+        }
         self.onError = onError
         self.onCancellation = onCancellation
     }
@@ -35,7 +44,7 @@ public struct FlowTask<ID: Hashable & Sendable, Success: Sendable> {
 
 public extension FlowTask where ID == UUID {
 
-    init(
+    init<Success: Sendable>(
         policy: DuplicateIDPolicy = .cancelAndReplace,
         work: @isolated(any) @escaping () async throws -> Success,
         onResult: (@isolated(any) (Success) async -> Void)? = nil,
@@ -50,5 +59,21 @@ public extension FlowTask where ID == UUID {
             onError: onError,
             onCancellation: onCancellation
         )
+    }
+}
+
+struct ErasedFlowTaskResult: Sendable {
+    private let storage: any Sendable
+
+    init<Success: Sendable>(_ value: Success) {
+        storage = value
+    }
+
+    func value<Success: Sendable>(as successType: Success.Type = Success.self) -> Success {
+        guard let value = storage as? Success else {
+            preconditionFailure("FlowTask result type mismatch. Expected \(successType), got \(Swift.type(of: storage))")
+        }
+
+        return value
     }
 }

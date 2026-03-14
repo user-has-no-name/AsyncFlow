@@ -67,6 +67,8 @@ let handle = executor.run(saveTask)
 
 `run(_:)` returns `Task<Void, Never>`. You can keep the handle if you want to await it or cancel it directly.
 
+`FlowTask` is generic only over its `ID`. The task result type is erased internally, so factories can return a single `FlowTask<TaskID>` type even when different task cases produce different values.
+
 ## Running tasks sequentially
 
 Use `runSequential(_:)` when later work must not start before earlier work finishes.
@@ -104,6 +106,17 @@ executor.runSequential(
 
 The tasks may return different result types.
 
+There is also an array overload if you want to build the group ahead of time:
+
+```swift
+let tasks: [FlowTask<String>] = [
+    loginTask,
+    profileTask
+]
+
+executor.runSequential(tasks)
+```
+
 ## Running tasks in parallel
 
 Use `runParallel(_:)` when the tasks are independent and should start together.
@@ -139,6 +152,12 @@ executor.runParallel(
 
 `runParallel(_:)` creates real concurrent child tasks. Each child is still tracked by the executor and keeps its own callbacks and cancellation behavior.
 
+There is also an array overload:
+
+```swift
+executor.runParallel([postsTask, notificationsTask])
+```
+
 If you need one hook for the whole group, use `onFinished`. It runs after every child task and callback has finished, including group cancellation:
 
 ```swift
@@ -169,6 +188,48 @@ executor.runParallel(
 Custom actor methods work the same way, and ordinary closures can capture non-`Sendable` state as long as each `FlowTask` value is treated as a one-way handoff into the executor.
 
 Main-actor tasks can still interleave when they suspend, but they do not bypass main-actor serialization. Keep expensive work off the main actor whenever possible.
+
+## Task factories
+
+If you want each view model or feature module to define its task catalog in one place, conform to `FlowTaskFactory`:
+
+```swift
+final class MenuViewModel: FlowTaskFactory {
+    enum TaskID: Hashable, Sendable {
+        case prepareSections
+        case fetchUser
+    }
+
+    func create(using taskID: TaskID) -> FlowTask<TaskID> {
+        switch taskID {
+        case .prepareSections:
+            FlowTask(
+                id: taskID,
+                work: prepareSections,
+                onResult: showSections
+            )
+        case .fetchUser:
+            FlowTask(
+                id: taskID,
+                work: fetchUser,
+                onResult: showUser
+            )
+        }
+    }
+}
+```
+
+Then you can run one task directly:
+
+```swift
+executor.run(create(using: .prepareSections))
+```
+
+Or build a group from several IDs:
+
+```swift
+executor.runParallel(create(using: .prepareSections, .fetchUser))
+```
 
 ## Duplicate ID policy
 
