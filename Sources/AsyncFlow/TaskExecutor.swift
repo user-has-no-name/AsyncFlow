@@ -23,8 +23,10 @@ public extension Executable {
     func runSequential<each ID: Hashable & Sendable, each Success: Sendable>(
         _ tasks: repeat FlowTask<each ID, each Success>
     ) -> Task<Void, Never> {
-        Task {
-            repeat await awaitHandle(run(each tasks))
+        let taskBoxes = (repeat TaskTransferBox(each tasks))
+
+        return Task {
+            repeat await awaitHandle(run((each taskBoxes).take()))
         }
     }
 
@@ -34,12 +36,13 @@ public extension Executable {
         onFinished: (@isolated(any) () async -> Void)? = nil
     ) -> Task<Void, Never> {
         let callback = ParallelCompletionCallback(onFinished)
+        let taskBoxes = (repeat TaskTransferBox(each tasks))
 
         return Task {
             await withTaskGroup(of: Void.self) { group in
-                for task in repeat each tasks {
+                for taskBox in repeat each taskBoxes {
                     group.addTask {
-                        await runOne(task)
+                        await runOne(taskBox.take())
                     }
                 }
                 await group.waitForAll()
@@ -49,7 +52,9 @@ public extension Executable {
         }
     }
 
-    private func runOne<ID: Hashable & Sendable, Success: Sendable>(_ task: FlowTask<ID, Success>) async {
+    private func runOne<ID: Hashable & Sendable, Success: Sendable>(
+        _ task: FlowTask<ID, Success>
+    ) async {
         await awaitHandle(run(task))
     }
 }
@@ -88,7 +93,7 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
             tasksBag: tasksBag,
             entry: entry,
             lifecycleLogger: lifecycleLogger,
-            task: task
+            taskBox: TaskTransferBox(task)
         )
 
         entry.setTask(handle)
@@ -107,11 +112,13 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
         tasksBag: TasksBag,
         entry: TaskEntry,
         lifecycleLogger: TaskLifecycleLogger,
-        task: FlowTask<ID, Success>
+        taskBox: TaskTransferBox<ID, Success>
     ) -> Task<Void, Never> {
         Task<Void, Never> { [tasksBag] in
+            let task = taskBox.take()
             let startedAt = Date()
             var outcome: TaskLifecycleOutcome = .cancelled
+            let cancellationCallback = AsyncCallbackOnce(task.onCancellation)
 
             lifecycleLogger.started(id: task.id, startedAt: startedAt)
 
@@ -126,33 +133,31 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
             }
 
             let notifyCancellation: @Sendable () -> Void = {
-                entry.notifyCancellationOnce {
-                    task.onCancellation?()
-                }
+                _ = cancellationCallback.start()
             }
 
             await withTaskCancellationHandler {
-                let ensureActiveOrNotifyCancellation: () -> Bool = {
+                let ensureActiveOrNotifyCancellation: () async -> Bool = {
                     guard entry.isCancelled
                     else {
                         return true
                     }
 
-                    notifyCancellation()
+                    await cancellationCallback.wait()
                     return false
                 }
 
-                let markFinishedOrNotifyCancellation: () -> Bool = {
+                let markFinishedOrNotifyCancellation: () async -> Bool = {
                     guard entry.markFinishedIfActive()
                     else {
-                        notifyCancellation()
+                        await cancellationCallback.wait()
                         return false
                     }
                     return true
                 }
 
                 do {
-                    guard ensureActiveOrNotifyCancellation()
+                    guard await ensureActiveOrNotifyCancellation()
                     else {
                         return
                     }
@@ -160,13 +165,13 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
 
                     let result: Success = try await task.work()
 
-                    guard ensureActiveOrNotifyCancellation()
+                    guard await ensureActiveOrNotifyCancellation()
                     else {
                         return
                     }
                     try Task.checkCancellation()
 
-                    guard markFinishedOrNotifyCancellation()
+                    guard await markFinishedOrNotifyCancellation()
                     else {
                         return
                     }
@@ -174,16 +179,16 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
                     await task.onResult?(result)
                 } catch is CancellationError {
                     outcome = .cancelled
-                    notifyCancellation()
+                    await cancellationCallback.wait()
                 } catch {
                     guard entry.isCancelled
                     else {
                         outcome = .failed(error)
-                        task.onError?(error)
+                        await task.onError?(error)
                         return
                     }
                     outcome = .cancelled
-                    notifyCancellation()
+                    await cancellationCallback.wait()
                 }
             } onCancel: {
                 guard entry.cancelIfActive()
@@ -219,5 +224,64 @@ private final class ParallelCompletionCallback: @unchecked Sendable {
 
     func call() async {
         await callback?()
+    }
+}
+
+private final class AsyncCallbackOnce: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: Task<Void, Never>?
+    private let callback: (@isolated(any) () async -> Void)?
+
+    init(_ callback: (@isolated(any) () async -> Void)?) {
+        self.callback = callback
+    }
+
+    @discardableResult
+    func start() -> Task<Void, Never>? {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+
+        if let task {
+            return task
+        }
+
+        guard let callback else {
+            return nil
+        }
+
+        let task = Task {
+            await callback()
+        }
+        self.task = task
+        return task
+    }
+
+    func wait() async {
+        await start()?.value
+    }
+}
+
+private final class TaskTransferBox<ID: Hashable & Sendable, Success: Sendable>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var task: FlowTask<ID, Success>?
+
+    init(_ task: FlowTask<ID, Success>) {
+        self.task = task
+    }
+
+    func take() -> FlowTask<ID, Success> {
+        lock.lock()
+        defer {
+            lock.unlock()
+        }
+
+        guard let task else {
+            preconditionFailure("FlowTask was already transferred")
+        }
+
+        self.task = nil
+        return task
     }
 }

@@ -45,13 +45,13 @@ struct TaskExecutorTests {
         if case let .success(first) = firstOutcome {
             #expect(first == 1)
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
 
         if case let .success(second) = secondOutcome {
             #expect(second == 2)
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
     }
 
@@ -93,13 +93,13 @@ struct TaskExecutorTests {
         if case let .success(first) = firstOutcome {
             #expect(first == 1)
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
 
         if case let .success(second) = secondOutcome {
             #expect(second == 2)
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
     }
 
@@ -165,13 +165,49 @@ struct TaskExecutorTests {
         await handle.value
 
         if case .cancelled = outcome {
-            #expect(true)
+            #expect(Bool(true))
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
 
         let recordedEvents = await events.snapshot()
         #expect(recordedEvents == ["finished"])
+    }
+
+    @Test
+    func runParallel_onFinishedWaitsForCancellationCallbacks() async {
+        let executor = TaskExecutor()
+        let gate = Gate()
+        let tracker = StartTracker()
+        let events = EventRecorder()
+
+        let task = FlowTask(
+            id: "task",
+            work: {
+                await tracker.markFirst()
+                await gate.wait()
+                return 1
+            },
+            onCancellation: {
+                await events.append("cancelled")
+            }
+        )
+
+        let handle = executor.runParallel(task) {
+            await events.append("finished")
+        }
+
+        let started = await waitUntil {
+            await tracker.hasStartedFirst()
+        }
+        #expect(started)
+
+        handle.cancel()
+        await gate.open()
+        await handle.value
+
+        let recordedEvents = await events.snapshot()
+        #expect(recordedEvents == ["cancelled", "finished"])
     }
 
     @Test
@@ -222,6 +258,72 @@ struct TaskExecutorTests {
     }
 
     @Test
+    func runParallel_acceptsCustomActorCallbacks() async {
+        let executor = TaskExecutor()
+        let recorder = ActorRecorder()
+
+        let firstTask = FlowTask(
+            id: "first",
+            work: {
+                try await recorder.load(1)
+            },
+            onResult: { value in
+                await recorder.record(value)
+            }
+        )
+
+        let secondTask = FlowTask(
+            id: "second",
+            work: {
+                try await recorder.load(2)
+            },
+            onResult: { value in
+                await recorder.record(value)
+            }
+        )
+
+        let handle = executor.runParallel(firstTask, secondTask) {
+            await recorder.finish()
+        }
+        await handle.value
+
+        let values = await recorder.values().sorted()
+        #expect(values == [1, 2, 99])
+    }
+
+    @Test
+    func run_acceptsNonSendableCapturedState() async {
+        let executor = TaskExecutor()
+        let probe = TaskExecutionProbe<Int>(timeoutSeconds: 1)
+        let box = NonSendableBox(value: 7)
+
+        let task = FlowTask(
+            id: "box",
+            work: {
+                box.value
+            },
+            onResult: { value in
+                box.recordedValue = value
+                await probe.onResult(value)
+            },
+            onError: probe.onError,
+            onCancellation: probe.onCancellation
+        )
+
+        let handle = executor.run(task)
+        let outcome = await probe.wait()
+        await handle.value
+
+        if case let .success(value) = outcome {
+            #expect(value == 7)
+        } else {
+            #expect(Bool(false))
+        }
+
+        #expect(box.recordedValue == 7)
+    }
+
+    @Test
     func run_reportsFailure() async {
         let executor = TaskExecutor()
         let probe = TaskExecutionProbe<Int>(timeoutSeconds: 1)
@@ -265,9 +367,9 @@ struct TaskExecutorTests {
         await handle.value
 
         if case .cancelled = outcome {
-            #expect(true)
+            #expect(Bool(true))
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
     }
 
@@ -307,15 +409,15 @@ struct TaskExecutorTests {
         await quickHandle.value
 
         if case .cancelled = blockedOutcome {
-            #expect(true)
+            #expect(Bool(true))
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
 
         if case let .success(value) = quickOutcome {
             #expect(value == 2)
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
     }
 
@@ -354,15 +456,15 @@ struct TaskExecutorTests {
         await secondHandle.value
 
         if case .cancelled = firstOutcome {
-            #expect(true)
+            #expect(Bool(true))
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
 
         if case let .success(value) = secondOutcome {
             #expect(value == 2)
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
     }
 }
@@ -384,7 +486,7 @@ struct TasksBagTests {
         if case let .stored(old) = decision {
             #expect(old == nil)
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
     }
 
@@ -398,9 +500,9 @@ struct TasksBagTests {
         let decision = bag.store(id: "id", policy: .ignoreNew, entry: second)
 
         if case .ignoredNew = decision {
-            #expect(true)
+            #expect(Bool(true))
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
     }
 
@@ -435,7 +537,7 @@ struct TasksBagTests {
         if case let .stored(old) = decision {
             #expect(old == nil)
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
     }
 
@@ -458,7 +560,7 @@ struct TasksBagTests {
         if case let .stored(old) = decision {
             #expect(old == nil)
         } else {
-            #expect(false)
+            #expect(Bool(false))
         }
     }
 }
@@ -479,17 +581,6 @@ struct TaskEntryTests {
         #expect(entry.markFinishedIfActive())
         #expect(!entry.cancelIfActive())
         #expect(!entry.isCancelled)
-    }
-
-    @Test
-    func notifyCancellationOnce_runsOnce() {
-        let entry = TaskEntry()
-        var callCount = 0
-
-        entry.notifyCancellationOnce { callCount += 1 }
-        entry.notifyCancellationOnce { callCount += 1 }
-
-        #expect(callCount == 1)
     }
 }
 
@@ -601,6 +692,36 @@ private final class MainActorRecorder<Value> {
     }
 }
 
+private actor ActorRecorder {
+    private var storedValues: [Int] = []
+
+    func load(_ value: Int) async throws -> Int {
+        value
+    }
+
+    func record(_ value: Int) {
+        storedValues.append(value)
+    }
+
+    func finish() {
+        storedValues.append(99)
+    }
+
+    func values() -> [Int] {
+        storedValues
+    }
+}
+
+private final class NonSendableBox {
+    var value: Int
+    var recordedValue: Int?
+
+    init(value: Int, recordedValue: Int? = nil) {
+        self.value = value
+        self.recordedValue = recordedValue
+    }
+}
+
 private func waitUntil(
     timeoutSeconds: TimeInterval = 1.0,
     pollIntervalNanos: UInt64 = 5_000_000,
@@ -622,7 +743,7 @@ private func makeTask<ID: Hashable & Sendable, Success: Sendable>(
     id: ID,
     policy: DuplicateIDPolicy = .cancelAndReplace,
     probe: TaskExecutionProbe<Success>,
-    work: @Sendable @escaping () async throws -> Success
+    work: @isolated(any) @escaping () async throws -> Success
 ) -> FlowTask<ID, Success> {
     FlowTask(
         id: id,
@@ -637,7 +758,7 @@ private func makeTask<ID: Hashable & Sendable, Success: Sendable>(
 private func makeTask<Success: Sendable>(
     policy: DuplicateIDPolicy = .cancelAndReplace,
     probe: TaskExecutionProbe<Success>,
-    work: @Sendable @escaping () async throws -> Success
+    work: @isolated(any) @escaping () async throws -> Success
 ) -> FlowTask<UUID, Success> {
     makeTask(
         id: UUID(),

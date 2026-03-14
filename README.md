@@ -149,7 +149,7 @@ executor.runParallel(
 )
 ```
 
-`FlowTask` also accepts `@MainActor` work and result callbacks, so you can submit tasks directly from UI-facing types without wrapping them yourself:
+`FlowTask` accepts actor-isolated work and callbacks, including `@MainActor`, so you can submit UI-facing methods or other actor-bound functions directly without wrapping them yourself:
 
 ```swift
 executor.runParallel(
@@ -165,6 +165,8 @@ executor.runParallel(
     )
 )
 ```
+
+Custom actor methods work the same way, and ordinary closures can capture non-`Sendable` state as long as each `FlowTask` value is treated as a one-way handoff into the executor.
 
 Main-actor tasks can still interleave when they suspend, but they do not bypass main-actor serialization. Keep expensive work off the main actor whenever possible.
 

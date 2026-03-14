@@ -11,7 +11,6 @@ package final class TaskEntry: @unchecked Sendable {
 
     private let lock: NSLock = .init()
     private var isCancelledFlag: Bool = false
-    private var hasNotifiedCancellation: Bool = false
     private var isFinished: Bool = false
     private var task: Task<Void, Never>?
 
@@ -71,16 +70,5 @@ package final class TaskEntry: @unchecked Sendable {
         }
         isFinished = true
         return true
-    }
-
-    package func notifyCancellationOnce(_ block: () -> Void) {
-        lock.lock()
-        if hasNotifiedCancellation {
-            lock.unlock()
-            return
-        }
-        hasNotifiedCancellation = true
-        lock.unlock()
-        block()
     }
 }
