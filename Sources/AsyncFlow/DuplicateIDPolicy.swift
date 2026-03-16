@@ -10,6 +10,17 @@
 ///
 /// Use this policy to encode whether duplicate IDs are a programmer error,
 /// should replace in-flight work, or should be ignored.
+///
+/// Example:
+///
+/// ```swift
+/// let task = FlowTask(
+///     id: "search",
+///     policy: .cancelAndReplace,
+///     work: { try await api.search(query) },
+///     onResult: showResults
+/// )
+/// ```
 public enum DuplicateIDPolicy: Sendable {
     /// Programmer error: the same ID must not be reused while a task is active.
     /// This uses a precondition; a violation will trap and typically terminates
