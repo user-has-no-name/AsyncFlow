@@ -1,245 +1,110 @@
 # AsyncFlow
 
-`AsyncFlow` is a small task executor built around one base type: `FlowTask`.
+`AsyncFlow` is a small Swift concurrency package for running asynchronous tasks with:
 
-You create one or more `FlowTask` values, then hand them to `TaskExecutor`:
+- duplicate-ID handling
+- sequential and parallel execution helpers
+- task lifecycle hooks and outcome callbacks
+- actor-isolated closures, including `@MainActor`
 
-- `run(_:)` runs one task
-- `runSequential(_:)` runs many tasks one after another
-- `runParallel(_:)` runs many tasks concurrently
+The package is centered around two types:
 
-Each task owns its own:
+- `FlowTask`: describes one unit of async work
+- `TaskExecutor`: runs tasks and tracks them by ID
 
-- `id`
-- duplicate-ID `policy`
-- async `work`
-- `onResult`
-- optional `onError`
-- `onCancellation`
+## Installation
 
-## Basic idea
+```swift
+dependencies: [
+    .package(url: "https://github.com/user-has-no-name/AsyncFlow.git", from: "1.0.0")
+],
+targets: [
+    .target(
+        name: "YourFeature",
+        dependencies: ["AsyncFlow"]
+    )
+]
+```
+
+For tests, add `AsyncFlowTestUtilities` to your test target:
+
+```swift
+.testTarget(
+    name: "YourFeatureTests",
+    dependencies: ["YourFeature", "AsyncFlowTestUtilities"]
+)
+```
+
+## Basic usage
+
+Create a `FlowTask`, then submit it to a `TaskExecutor`:
 
 ```swift
 import AsyncFlow
 
 let executor = TaskExecutor()
 
+let loadProfileTask = FlowTask(
+    id: "load-profile",
+    work: {
+        try await api.loadProfile()
+    },
+    onBeforeStart: {
+        viewModel.isLoading = true
+    },
+    onResult: { profile in
+        viewModel.profile = profile
+    },
+    onError: { error in
+        viewModel.errorMessage = error.localizedDescription
+    },
+    onFinish: {
+        viewModel.isLoading = false
+    }
+)
+
+let handle = executor.run(loadProfileTask)
+await handle.value
+```
+
+`run(_:)` returns `Task<Void, Never>`, so you can:
+
+- `await handle.value` to wait for completion
+- `handle.cancel()` to cancel directly
+- ignore the handle if callback-based delivery is enough
+
+## Task lifecycle hooks
+
+Use `onBeforeStart` and `onFinish` when you want `work` to stay focused on the async operation itself.
+
+```swift
 let task = FlowTask(
-    id: "load-user",
-    policy: .cancelAndReplace,
-    work: {
-        try await api.loadUser()
+    id: "wallet",
+    work: walletService.fetchWallet,
+    onBeforeStart: {
+        viewModel.isLoadingWallet = true
     },
-    onResult: { user in
-        print("Loaded user:", user)
-    },
-    onError: { error in
-        print("Failed:", error)
-    },
-    onCancellation: {
-        print("Task was cancelled")
-    }
-)
-
-executor.run(task)
-```
-
-## Running one task
-
-Use `run(_:)` when you want the executor to track one task by ID.
-
-```swift
-let saveTask = FlowTask(
-    id: "save-draft",
-    work: {
-        try await drafts.save()
-    },
-    onResult: { _ in
-        print("Saved")
+    onResult: { wallet in
+        viewModel.wallet = wallet
     },
     onError: { error in
-        print("Save failed:", error)
+        viewModel.errorMessage = error.localizedDescription
+    },
+    onFinish: {
+        viewModel.isLoadingWallet = false
     }
 )
-
-let handle = executor.run(saveTask)
 ```
 
-`run(_:)` returns `Task<Void, Never>`. You can keep the handle if you want to await it or cancel it directly.
+`onFinish` runs after `onResult`, `onError`, or `onCancellation`, so shared cleanup only needs to live in one place.
 
-`FlowTask` is generic only over its `ID`. The task result type is erased internally, so factories can return a single `FlowTask<TaskID>` type even when different task cases produce different values.
+## When to choose each duplicate-ID policy
 
-## Running tasks sequentially
+Each `FlowTask` has a `policy` that applies when another active task already uses the same ID.
 
-Use `runSequential(_:)` when later work must not start before earlier work finishes.
+### `.cancelAndReplace`
 
-Each task still reports its own result through its own callbacks.
-
-```swift
-executor.runSequential(
-    FlowTask(
-        id: "login",
-        work: {
-            try await auth.login()
-        },
-        onResult: { session in
-            print("Logged in:", session)
-        },
-        onError: { error in
-            print("Login failed:", error)
-        }
-    ),
-    FlowTask(
-        id: "profile",
-        work: {
-            try await api.loadProfile()
-        },
-        onResult: { profile in
-            print("Profile:", profile)
-        },
-        onError: { error in
-            print("Profile failed:", error)
-        }
-    )
-)
-```
-
-The tasks may return different result types.
-
-There is also an array overload if you want to build the group ahead of time:
-
-```swift
-let tasks: [FlowTask<String>] = [
-    loginTask,
-    profileTask
-]
-
-executor.runSequential(tasks)
-```
-
-## Running tasks in parallel
-
-Use `runParallel(_:)` when the tasks are independent and should start together.
-
-```swift
-executor.runParallel(
-    FlowTask(
-        id: "posts",
-        work: {
-            try await api.loadPosts()
-        },
-        onResult: { posts in
-            print("Posts count:", posts.count)
-        },
-        onError: { error in
-            print("Posts failed:", error)
-        }
-    ),
-    FlowTask(
-        id: "notifications",
-        work: {
-            try await api.loadNotifications()
-        },
-        onResult: { notifications in
-            print("Notifications:", notifications.count)
-        },
-        onError: { error in
-            print("Notifications failed:", error)
-        }
-    )
-)
-```
-
-`runParallel(_:)` creates real concurrent child tasks. Each child is still tracked by the executor and keeps its own callbacks and cancellation behavior.
-
-There is also an array overload:
-
-```swift
-executor.runParallel([postsTask, notificationsTask])
-```
-
-If you need one hook for the whole group, use `onFinished`. It runs after every child task and callback has finished, including group cancellation:
-
-```swift
-executor.runParallel(
-    firstTask,
-    secondTask,
-    onFinished: viewModel.stopLoading
-)
-```
-
-`FlowTask` accepts actor-isolated work and callbacks, including `@MainActor`, so you can submit UI-facing methods or other actor-bound functions directly without wrapping them yourself:
-
-```swift
-executor.runParallel(
-    FlowTask(
-        id: "profile",
-        work: viewModel.loadProfile,
-        onResult: viewModel.showProfile
-    ),
-    FlowTask(
-        id: "feed",
-        work: viewModel.loadFeed,
-        onResult: viewModel.showFeed
-    )
-)
-```
-
-Custom actor methods work the same way, and ordinary closures can capture non-`Sendable` state as long as each `FlowTask` value is treated as a one-way handoff into the executor.
-
-Main-actor tasks can still interleave when they suspend, but they do not bypass main-actor serialization. Keep expensive work off the main actor whenever possible.
-
-## Task factories
-
-If you want each view model or feature module to define its task catalog in one place, conform to `FlowTaskFactory`:
-
-```swift
-final class MenuViewModel: FlowTaskFactory {
-    enum TaskID: Hashable, Sendable {
-        case prepareSections
-        case fetchUser
-    }
-
-    func create(using taskID: TaskID) -> FlowTask<TaskID> {
-        switch taskID {
-        case .prepareSections:
-            FlowTask(
-                id: taskID,
-                work: prepareSections,
-                onResult: showSections
-            )
-        case .fetchUser:
-            FlowTask(
-                id: taskID,
-                work: fetchUser,
-                onResult: showUser
-            )
-        }
-    }
-}
-```
-
-Then you can run one task directly:
-
-```swift
-executor.run(create(using: .prepareSections))
-```
-
-Or build a group from several IDs:
-
-```swift
-executor.runParallel(create(using: .prepareSections, .fetchUser))
-```
-
-## Duplicate ID policy
-
-If you submit another task with the same ID while one is still active, `DuplicateIDPolicy` decides what happens:
-
-- `.cancelAndReplace`: cancel the old task and run the new one
-- `.ignoreNew`: keep the old task, ignore the new one
-- `.preconditionFail`: treat duplicate IDs as a programmer error
-
-Example:
+Use this for refresh-style actions where the newest request should win.
 
 ```swift
 let task = FlowTask(
@@ -248,26 +113,204 @@ let task = FlowTask(
     work: {
         try await api.search(query)
     },
-    onResult: { result in
-        print(result)
+    onResult: showResults
+)
+```
+
+Good fit:
+
+- search-as-you-type
+- repeated reloads of the same screen
+- retrying the same operation with fresh input
+
+### `.ignoreNew`
+
+Use this when a second submission should be ignored while work is already in flight.
+
+```swift
+let task = FlowTask(
+    id: "sync",
+    policy: .ignoreNew,
+    work: syncService.run,
+    onResult: { _ in
+        logger.info("Sync finished")
+    }
+)
+```
+
+Good fit:
+
+- background sync
+- expensive one-at-a-time work
+- button taps that should not start duplicates
+
+### `.preconditionFail`
+
+Use this only when duplicate submission is always a programmer error.
+
+```swift
+let task = FlowTask(
+    id: "bootstrap",
+    policy: .preconditionFail,
+    work: bootstrapApp
+)
+```
+
+Good fit:
+
+- startup work that must only be scheduled once
+- internal invariants you want to catch immediately during development
+
+## Using auto-generated IDs
+
+If you do not need to refer to a task later by a domain-specific ID, use the `UUID` convenience initializer:
+
+```swift
+let task = FlowTask(
+    work: {
+        try await cache.warmUp()
     },
-    onError: { error in
-        print(error)
+    onResult: { _ in
+        print("Cache ready")
     }
 )
 
 executor.run(task)
 ```
 
-`search` is a good example for `.cancelAndReplace`: every new query should cancel the previous one.
+## Running tasks sequentially
 
-## Cancellation
-
-Cancel one active task by ID:
+Use `runSequential` when later work depends on earlier work finishing.
 
 ```swift
-executor.cancel(id: "search")
+let loginTask = FlowTask(
+    id: "login",
+    work: {
+        try await authService.login()
+    },
+    onResult: { session in
+        print("Logged in:", session.userID)
+    }
+)
+
+let loadProfileTask = FlowTask(
+    id: "profile",
+    work: {
+        try await api.loadProfile()
+    },
+    onResult: { profile in
+        print("Loaded profile:", profile.name)
+    }
+)
+
+await executor.runSequential(loginTask, loadProfileTask).value
 ```
+
+You can also pass an array when tasks are assembled elsewhere:
+
+```swift
+let tasks = factory.create(using: .profile, .notifications)
+await executor.runSequential(tasks).value
+```
+
+## Running tasks in parallel
+
+Use `runParallel` when tasks are independent and should start together.
+
+```swift
+let profileTask = FlowTask(
+    id: "profile",
+    work: {
+        try await api.loadProfile()
+    },
+    onResult: { profile in
+        viewModel.profile = profile
+    }
+)
+
+let notificationsTask = FlowTask(
+    id: "notifications",
+    work: {
+        try await api.loadNotifications()
+    },
+    onResult: { notifications in
+        viewModel.notifications = notifications
+    }
+)
+
+await executor.runParallel(profileTask, notificationsTask).value
+```
+
+If the whole group should trigger a final callback, use `onFinished`:
+
+```swift
+await executor.runParallel(profileTask, notificationsTask) {
+    await MainActor.run {
+        viewModel.isLoading = false
+    }
+}.value
+```
+
+`onFinished` runs after:
+
+- every child task has finished
+- every task lifecycle callback, including `onFinish`, has completed
+- group cancellation has propagated
+
+## Actor-isolated callbacks and work
+
+`FlowTask` accepts actor-isolated closures, so UI-facing code can be passed directly.
+
+```swift
+@MainActor
+final class ProfileViewModel {
+    private let executor = TaskExecutor()
+
+    func refresh() {
+        executor.run(
+            FlowTask(
+                id: "profile",
+                work: loadProfile,
+                onResult: showProfile,
+                onError: showError
+            )
+        )
+    }
+
+    func loadProfile() async throws -> Profile {
+        try await api.loadProfile()
+    }
+
+    func showProfile(_ profile: Profile) {
+        self.profile = profile
+    }
+
+    func showError(_ error: Error) {
+        errorMessage = error.localizedDescription
+    }
+}
+```
+
+Custom actors work the same way:
+
+```swift
+actor ProfileStore {
+    func fetch() async throws -> Profile { ... }
+    func save(_ profile: Profile) { ... }
+}
+
+let store = ProfileStore()
+
+executor.run(
+    FlowTask(
+        id: "profile",
+        work: store.fetch,
+        onResult: store.save
+    )
+)
+```
+
+## Cancelling work
 
 Cancel everything:
 
@@ -275,56 +318,60 @@ Cancel everything:
 executor.cancelAll()
 ```
 
-You can also cancel the returned `Task` handle:
+Cancel one task by ID:
 
 ```swift
-let handle = executor.run(task)
-handle.cancel()
+executor.cancel(id: "profile")
 ```
 
-If cancellation reaches a `FlowTask`, its `onCancellation` closure is called once.
+If a task defines `onCancellation`, AsyncFlow runs it once even if cancellation is observed from multiple places.
 
-## Lifecycle logging
+## Organizing tasks with `FlowTaskFactory`
 
-`TaskExecutor` emits task lifecycle logs through `OSLog` with:
-
-- task ID
-- start timestamp
-- finish timestamp
-- total duration in milliseconds
-- terminal status (`completed`, `cancelled`, or `failed`)
-
-Tasks ignored because of `.ignoreNew` are also logged.
-
-## UUID convenience initializer
-
-If you do not care about a custom ID, use the `UUID` convenience initializer:
+Use `FlowTaskFactory` when a feature has a stable catalog of tasks.
 
 ```swift
-let task = FlowTask(
-    work: {
-        try await analytics.flush()
-    },
-    onResult: { _ in
-        print("Flushed")
-    },
-    onError: { error in
-        print(error)
+final class DashboardViewModel: FlowTaskFactory {
+    enum TaskID: Hashable, Sendable {
+        case profile
+        case notifications
     }
-)
+
+    func create(using taskID: TaskID) -> FlowTask<TaskID> {
+        switch taskID {
+        case .profile:
+            FlowTask(
+                id: taskID,
+                work: loadProfile,
+                onResult: showProfile
+            )
+        case .notifications:
+            FlowTask(
+                id: taskID,
+                work: loadNotifications,
+                onResult: showNotifications
+            )
+        }
+    }
+}
+
+let tasks = viewModel.create(using: .profile, .notifications)
+await executor.runParallel(tasks).value
 ```
 
-This creates a new `UUID` ID automatically.
+This pattern is useful when:
 
-## Testing helpers
+- view models define multiple task entry points
+- you want task wiring in one file
+- sequential or parallel groups should be assembled from named task cases
 
-The `AsyncFlowTestUtilities` target includes small helpers for tests:
+## Testing
 
-- `TaskExecutionProbe`
-- `TaskExecutionOutcome`
-- `awaitTask(...)`
+`AsyncFlowTestUtilities` adds helpers for waiting on task outcomes in tests.
 
-Example:
+### `awaitTask`
+
+Use `awaitTask` when you want the helper to build and run the task for you:
 
 ```swift
 import AsyncFlow
@@ -332,7 +379,42 @@ import AsyncFlowTestUtilities
 
 let executor = TaskExecutor()
 
-let outcome = await executor.awaitTask(id: "sample") {
-    42
+let outcome = await executor.awaitTask(id: "profile") {
+    try await api.loadProfile()
+}
+
+if case let .success(profile) = outcome {
+    #expect(profile.name == "Taylor")
 }
 ```
+
+### `TaskExecutionProbe`
+
+Use `TaskExecutionProbe` when the task is built manually but you still want a convenient async assertion point:
+
+```swift
+let probe = TaskExecutionProbe<Int>()
+
+let task = FlowTask(
+    id: "count",
+    work: { 42 },
+    onResult: probe.onResult,
+    onError: probe.onError,
+    onCancellation: probe.onCancellation
+)
+
+_ = executor.run(task)
+
+let outcome = await probe.wait()
+if case let .success(value) = outcome {
+    #expect(value == 42)
+}
+```
+
+## Practical guidance
+
+- Use stable domain IDs when the task may need replacement or cancellation later.
+- Use `.cancelAndReplace` for refresh-like UI flows.
+- Use `.ignoreNew` to suppress duplicate taps or overlapping background jobs.
+- Keep heavy work off `@MainActor`; only the UI updates need to be main-actor isolated.
+- Prefer `FlowTaskFactory` once a feature has more than a couple of task definitions.

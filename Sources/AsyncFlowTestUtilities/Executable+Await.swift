@@ -10,6 +10,21 @@ import Foundation
 
 public extension Executable {
 
+    /// Runs a task and waits for its final outcome in tests.
+    ///
+    /// This helper builds a `FlowTask`, submits it to the executor, and resolves to
+    /// a ``TaskExecutionOutcome`` when the task succeeds, fails, is cancelled, or
+    /// times out.
+    ///
+    /// ```swift
+    /// let outcome = await executor.awaitTask(id: "profile") {
+    ///     try await api.loadProfile()
+    /// }
+    ///
+    /// if case let .success(profile) = outcome {
+    ///     #expect(profile.name == "Taylor")
+    /// }
+    /// ```
     func awaitTask<ID: Hashable & Sendable, Success: Sendable>(
         id: ID,
         policy: DuplicateIDPolicy = .cancelAndReplace,
@@ -46,6 +61,7 @@ public extension Executable {
         )
     }
 
+    /// Runs a task with an auto-generated ID and waits for its final outcome in tests.
     func awaitTask<Success: Sendable>(
         policy: DuplicateIDPolicy = .cancelAndReplace,
         timeoutSeconds: TimeInterval? = 1.0,
@@ -62,6 +78,7 @@ public extension Executable {
     }
 }
 
+/// Suspends a test until a task outcome becomes available.
 private final class OutcomeAwaiter<Success: Sendable>: @unchecked Sendable {
 
     private let lock = NSLock()
@@ -69,6 +86,7 @@ private final class OutcomeAwaiter<Success: Sendable>: @unchecked Sendable {
     private var pendingOutcome: TaskExecutionOutcome<Success>?
     private var resolved = false
 
+    /// Starts waiting for the outcome and optionally enforces a timeout.
     func wait(
         timeoutSeconds: TimeInterval?,
         cancelOnTimeout: @escaping @Sendable () -> Void,
@@ -115,6 +133,7 @@ private final class OutcomeAwaiter<Success: Sendable>: @unchecked Sendable {
         }
     }
 
+    /// Resolves the awaiter exactly once.
     @discardableResult
     func resolve(_ outcome: TaskExecutionOutcome<Success>) -> Bool {
         lock.lock()
@@ -137,6 +156,25 @@ private final class OutcomeAwaiter<Success: Sendable>: @unchecked Sendable {
     }
 }
 
+/// Reusable probe that exposes callbacks you can plug into a `FlowTask` in tests.
+///
+/// This is useful when the task is built elsewhere and you only want to await the
+/// resulting callbacks.
+///
+/// ```swift
+/// let probe = TaskExecutionProbe<Int>()
+///
+/// let task = FlowTask(
+///     id: "count",
+///     work: { 42 },
+///     onResult: probe.onResult,
+///     onError: probe.onError,
+///     onCancellation: probe.onCancellation
+/// )
+///
+/// _ = executor.run(task)
+/// let outcome = await probe.wait()
+/// ```
 public final class TaskExecutionProbe<Success: Sendable>: @unchecked Sendable {
 
     private let awaiter = OutcomeAwaiter<Success>()
@@ -151,24 +189,28 @@ public final class TaskExecutionProbe<Success: Sendable>: @unchecked Sendable {
         self.cancelOnTimeout = cancelOnTimeout
     }
 
+    /// Callback you can pass to `FlowTask.onResult`.
     public var onResult: @Sendable (Success) async -> Void {
         { [awaiter] value in
             _ = awaiter.resolve(.success(value))
         }
     }
 
+    /// Callback you can pass to `FlowTask.onError`.
     public var onError: @Sendable (Error) -> Void {
         { [awaiter] error in
             _ = awaiter.resolve(.failure(error))
         }
     }
 
+    /// Callback you can pass to `FlowTask.onCancellation`.
     public var onCancellation: @Sendable () -> Void {
         { [awaiter] in
             _ = awaiter.resolve(.cancelled)
         }
     }
 
+    /// Waits until one of the probe callbacks resolves.
     public func wait() async -> TaskExecutionOutcome<Success> {
         await awaiter.wait(
             timeoutSeconds: timeoutSeconds,

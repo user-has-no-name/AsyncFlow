@@ -7,6 +7,10 @@
 
 import Foundation
 
+/// Thread-safe storage for active tasks keyed by task ID.
+///
+/// `TaskExecutor` delegates duplicate-ID handling and bulk cancellation to this
+/// type so the execution logic can stay focused on task lifecycle callbacks.
 package final class TasksBag: @unchecked Sendable {
 
     private var bag: Dictionary<AnyHashable, TaskEntry> = .init()
@@ -14,11 +18,13 @@ package final class TasksBag: @unchecked Sendable {
 
     package init() { }
 
+    /// Result of trying to insert a task entry.
     package enum StoreDecision {
         case stored(cancelOld: TaskEntry?)
         case ignoredNew
     }
 
+    /// Stores a new entry and applies the duplicate-ID policy if needed.
     package func store(
         id: AnyHashable,
         policy: DuplicateIDPolicy,
@@ -47,6 +53,7 @@ package final class TasksBag: @unchecked Sendable {
         }
     }
 
+    /// Removes the entry only if it is still the current entry for that ID.
     package func remove(_ id: AnyHashable, entry: TaskEntry) {
         lock.lock()
         if let current: TaskEntry = bag[id],
@@ -56,6 +63,7 @@ package final class TasksBag: @unchecked Sendable {
         lock.unlock()
     }
 
+    /// Cancels every active entry and clears the bag.
     package func cancelAll() {
         lock.lock()
         let entries: Array<TaskEntry> = Array(bag.values)
@@ -66,6 +74,7 @@ package final class TasksBag: @unchecked Sendable {
         }
     }
 
+    /// Cancels one active entry and removes it from the bag.
     package func cancel(_ id: AnyHashable) {
         lock.lock()
         let entry: TaskEntry? = bag[id]

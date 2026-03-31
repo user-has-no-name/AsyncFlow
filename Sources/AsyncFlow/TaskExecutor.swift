@@ -7,18 +7,41 @@
 
 import Foundation
 
+/// Common execution interface used by `TaskExecutor` and test doubles.
+///
+/// The protocol exposes the core operations for submitting, awaiting, and
+/// cancelling tasks.
 public protocol Executable: Sendable {
 
+    /// Submits one task for execution.
+    ///
+    /// - Parameter task: Task to run.
+    /// - Returns: A handle you can `await` or cancel.
+    ///
+    /// ```swift
+    /// let handle = executor.run(loadFeedTask)
+    /// await handle.value
+    /// ```
     @discardableResult
     func run<ID: Hashable & Sendable>(
         _ task: FlowTask<ID>
     ) -> Task<Void, Never>
 
+    /// Cancels every task that is currently tracked by the executor.
     func cancelAll()
+
+    /// Cancels the active task associated with the supplied identifier, if present.
     func cancel(id: AnyHashable)
 }
 
 public extension Executable {
+    /// Runs tasks one after another using a variadic list.
+    ///
+    /// Later tasks do not start until earlier task handles have completed.
+    ///
+    /// ```swift
+    /// executor.runSequential(loginTask, loadProfileTask)
+    /// ```
     @discardableResult
     func runSequential<each ID: Hashable & Sendable>(
         _ tasks: repeat FlowTask<each ID>
@@ -30,6 +53,7 @@ public extension Executable {
         }
     }
 
+    /// Runs tasks one after another from a pre-built array.
     @discardableResult
     func runSequential<ID: Hashable & Sendable>(
         _ tasks: [FlowTask<ID>]
@@ -43,6 +67,16 @@ public extension Executable {
         }
     }
 
+    /// Runs tasks concurrently using a variadic list.
+    ///
+    /// `onFinished` runs after all child tasks have finished and after their
+    /// lifecycle callbacks, including `onFinish`, have completed.
+    ///
+    /// ```swift
+    /// executor.runParallel(profileTask, feedTask) {
+    ///     await viewModel.stopLoading()
+    /// }
+    /// ```
     @discardableResult
     func runParallel<each ID: Hashable & Sendable>(
         _ tasks: repeat FlowTask<each ID>,
@@ -65,6 +99,7 @@ public extension Executable {
         }
     }
 
+    /// Runs tasks concurrently from a pre-built array.
     @discardableResult
     func runParallel<ID: Hashable & Sendable>(
         _ tasks: [FlowTask<ID>],
@@ -94,11 +129,16 @@ public extension Executable {
     }
 }
 
+/// Default executor implementation for `FlowTask` values.
+///
+/// `TaskExecutor` keeps track of active task IDs, applies duplicate-ID policies,
+/// and forwards task lifecycle events to the configured callbacks.
 public final class TaskExecutor: Executable, @unchecked Sendable {
 
     private let tasksBag: TasksBag = .init()
     private let lifecycleLogger: TaskLifecycleLogger = .init()
 
+    /// Creates an empty executor.
     public init() { }
 
     deinit {
@@ -135,10 +175,16 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
         return handle
     }
 
+    /// Cancels every tracked task immediately.
     public func cancelAll() {
         tasksBag.cancelAll()
     }
 
+    /// Cancels the tracked task with the given identifier.
+    ///
+    /// ```swift
+    /// executor.cancel(id: "load-profile")
+    /// ```
     public func cancel(id: AnyHashable) {
         tasksBag.cancel(id)
     }
@@ -153,7 +199,10 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
             let task = taskBox.take()
             let startedAt = Date()
             var outcome: TaskLifecycleOutcome = .cancelled
+            // The cancellation callback may be triggered by several paths. This
+            // wrapper guarantees it runs at most once and that all paths can await it.
             let cancellationCallback = AsyncCallbackOnce(task.onCancellation)
+            let finishCallback = AsyncCallbackOnce(task.onFinish)
 
             lifecycleLogger.started(id: task.id, startedAt: startedAt)
 
@@ -172,6 +221,9 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
             }
 
             await withTaskCancellationHandler {
+                // A task can be cancelled before its work closure starts or while it
+                // is suspended. We re-check the entry state around each async boundary
+                // so callbacks stay consistent with the final task outcome.
                 let ensureActiveOrNotifyCancellation: () async -> Bool = {
                     guard entry.isCancelled
                     else {
@@ -198,6 +250,14 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
                     }
                     try Task.checkCancellation()
 
+                    await task.onBeforeStart?()
+
+                    guard await ensureActiveOrNotifyCancellation()
+                    else {
+                        return
+                    }
+                    try Task.checkCancellation()
+
                     let result: ErasedFlowTaskResult = try await task.work()
 
                     guard await ensureActiveOrNotifyCancellation()
@@ -218,6 +278,11 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
                 } catch {
                     guard entry.isCancelled
                     else {
+                        guard await markFinishedOrNotifyCancellation()
+                        else {
+                            outcome = .cancelled
+                            return
+                        }
                         outcome = .failed(error)
                         await task.onError?(error)
                         return
@@ -232,6 +297,8 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
                 }
                 notifyCancellation()
             }
+
+            await finishCallback.wait()
         }
     }
 }
@@ -250,6 +317,7 @@ private func awaitHandle(_ handle: Task<Void, Never>) async {
     }
 }
 
+/// Stores the group-level completion callback for parallel execution.
 private final class ParallelCompletionCallback: @unchecked Sendable {
     private let callback: (@isolated(any) () async -> Void)?
 
@@ -262,6 +330,8 @@ private final class ParallelCompletionCallback: @unchecked Sendable {
     }
 }
 
+/// Ensures an async callback is started at most once and can be awaited from
+/// multiple code paths.
 private final class AsyncCallbackOnce: @unchecked Sendable {
     private let lock = NSLock()
     private var task: Task<Void, Never>?
@@ -298,6 +368,8 @@ private final class AsyncCallbackOnce: @unchecked Sendable {
     }
 }
 
+/// One-way transfer wrapper used to hand a `FlowTask` into a new concurrent
+/// context without accidentally reading it again later.
 private final class TaskTransferBox<ID: Hashable & Sendable>: @unchecked Sendable {
     private let lock = NSLock()
     private var task: FlowTask<ID>?
