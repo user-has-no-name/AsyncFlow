@@ -4,7 +4,7 @@
 
 - duplicate-ID handling
 - sequential and parallel execution helpers
-- success, failure, and cancellation callbacks
+- task lifecycle hooks and outcome callbacks
 - actor-isolated closures, including `@MainActor`
 
 The package is centered around two types:
@@ -49,13 +49,16 @@ let loadProfileTask = FlowTask(
     work: {
         try await api.loadProfile()
     },
+    onBeforeStart: {
+        viewModel.isLoading = true
+    },
     onResult: { profile in
         viewModel.profile = profile
     },
     onError: { error in
         viewModel.errorMessage = error.localizedDescription
     },
-    onCancellation: {
+    onFinish: {
         viewModel.isLoading = false
     }
 )
@@ -69,6 +72,31 @@ await handle.value
 - `await handle.value` to wait for completion
 - `handle.cancel()` to cancel directly
 - ignore the handle if callback-based delivery is enough
+
+## Task lifecycle hooks
+
+Use `onBeforeStart` and `onFinish` when you want `work` to stay focused on the async operation itself.
+
+```swift
+let task = FlowTask(
+    id: "wallet",
+    work: walletService.fetchWallet,
+    onBeforeStart: {
+        viewModel.isLoadingWallet = true
+    },
+    onResult: { wallet in
+        viewModel.wallet = wallet
+    },
+    onError: { error in
+        viewModel.errorMessage = error.localizedDescription
+    },
+    onFinish: {
+        viewModel.isLoadingWallet = false
+    }
+)
+```
+
+`onFinish` runs after `onResult`, `onError`, or `onCancellation`, so shared cleanup only needs to live in one place.
 
 ## When to choose each duplicate-ID policy
 
@@ -226,7 +254,7 @@ await executor.runParallel(profileTask, notificationsTask) {
 `onFinished` runs after:
 
 - every child task has finished
-- every success, failure, or cancellation callback has completed
+- every task lifecycle callback, including `onFinish`, has completed
 - group cancellation has propagated
 
 ## Actor-isolated callbacks and work

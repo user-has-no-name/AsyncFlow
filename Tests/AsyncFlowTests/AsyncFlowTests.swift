@@ -405,6 +405,35 @@ struct TaskExecutorTests {
     }
 
     @Test
+    func run_onBeforeStartAndOnFinishWrapWorkAndResult() async {
+        let executor = TaskExecutor()
+        let events = EventRecorder()
+
+        let task = FlowTask(
+            id: "task",
+            work: {
+                await events.append("work")
+                return 1
+            },
+            onBeforeStart: {
+                await events.append("before")
+            },
+            onResult: { value in
+                await events.append("result-\(value)")
+            },
+            onFinish: {
+                await events.append("finish")
+            }
+        )
+
+        let handle = executor.run(task)
+        await handle.value
+
+        let recordedEvents = await events.snapshot()
+        #expect(recordedEvents == ["before", "work", "result-1", "finish"])
+    }
+
+    @Test
     func run_reportsFailure() async {
         let executor = TaskExecutor()
         let probe = TaskExecutionProbe<Int>(timeoutSeconds: 1)
@@ -419,6 +448,84 @@ struct TaskExecutorTests {
 
         let isTestError = (outcome.error as? TestError) != nil
         #expect(isTestError)
+    }
+
+    @Test
+    func run_onFinishRunsAfterOnErrorAndIgnoresLateCancellation() async {
+        let executor = TaskExecutor()
+        let gate = Gate()
+        let events = EventRecorder()
+
+        let task = FlowTask(
+            id: "task",
+            work: {
+                throw TestError.boom
+            },
+            onError: { _ in
+                await events.append("error")
+                await gate.wait()
+            },
+            onCancellation: {
+                await events.append("cancelled")
+            },
+            onFinish: {
+                await events.append("finish")
+            }
+        )
+
+        let handle = executor.run(task)
+
+        let sawError = await waitUntil {
+            await events.snapshot().contains("error")
+        }
+        #expect(sawError)
+
+        handle.cancel()
+        await gate.open()
+        await handle.value
+
+        let recordedEvents = await events.snapshot()
+        #expect(recordedEvents == ["error", "finish"])
+    }
+
+    @Test
+    func run_onFinishRunsAfterOnCancellation() async {
+        let executor = TaskExecutor()
+        let gate = Gate()
+        let tracker = StartTracker()
+        let events = EventRecorder()
+
+        let task = FlowTask(
+            id: "task",
+            work: {
+                await tracker.markFirst()
+                await gate.wait()
+                return 1
+            },
+            onBeforeStart: {
+                await events.append("before")
+            },
+            onCancellation: {
+                await events.append("cancelled")
+            },
+            onFinish: {
+                await events.append("finish")
+            }
+        )
+
+        let handle = executor.run(task)
+
+        let started = await waitUntil {
+            await tracker.hasStartedFirst()
+        }
+        #expect(started)
+
+        handle.cancel()
+        await gate.open()
+        await handle.value
+
+        let recordedEvents = await events.snapshot()
+        #expect(recordedEvents == ["before", "cancelled", "finish"])
     }
 
     @Test

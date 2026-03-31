@@ -70,7 +70,7 @@ public extension Executable {
     /// Runs tasks concurrently using a variadic list.
     ///
     /// `onFinished` runs after all child tasks have finished and after their
-    /// success, failure, or cancellation callbacks have completed.
+    /// lifecycle callbacks, including `onFinish`, have completed.
     ///
     /// ```swift
     /// executor.runParallel(profileTask, feedTask) {
@@ -132,7 +132,7 @@ public extension Executable {
 /// Default executor implementation for `FlowTask` values.
 ///
 /// `TaskExecutor` keeps track of active task IDs, applies duplicate-ID policies,
-/// and forwards completion, failure, and cancellation to the task callbacks.
+/// and forwards task lifecycle events to the configured callbacks.
 public final class TaskExecutor: Executable, @unchecked Sendable {
 
     private let tasksBag: TasksBag = .init()
@@ -202,6 +202,7 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
             // The cancellation callback may be triggered by several paths. This
             // wrapper guarantees it runs at most once and that all paths can await it.
             let cancellationCallback = AsyncCallbackOnce(task.onCancellation)
+            let finishCallback = AsyncCallbackOnce(task.onFinish)
 
             lifecycleLogger.started(id: task.id, startedAt: startedAt)
 
@@ -249,6 +250,14 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
                     }
                     try Task.checkCancellation()
 
+                    await task.onBeforeStart?()
+
+                    guard await ensureActiveOrNotifyCancellation()
+                    else {
+                        return
+                    }
+                    try Task.checkCancellation()
+
                     let result: ErasedFlowTaskResult = try await task.work()
 
                     guard await ensureActiveOrNotifyCancellation()
@@ -269,6 +278,11 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
                 } catch {
                     guard entry.isCancelled
                     else {
+                        guard await markFinishedOrNotifyCancellation()
+                        else {
+                            outcome = .cancelled
+                            return
+                        }
                         outcome = .failed(error)
                         await task.onError?(error)
                         return
@@ -283,6 +297,8 @@ public final class TaskExecutor: Executable, @unchecked Sendable {
                 }
                 notifyCancellation()
             }
+
+            await finishCallback.wait()
         }
     }
 }

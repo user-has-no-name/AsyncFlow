@@ -10,7 +10,7 @@ import Foundation
 /// Describes one unit of asynchronous work that can be submitted to an ``Executable``.
 ///
 /// A `FlowTask` bundles the task identifier, duplicate-ID handling policy, the async
-/// work itself, and the callbacks that receive the outcome.
+/// work itself, and the lifecycle callbacks around that work.
 ///
 /// Typical usage:
 ///
@@ -42,9 +42,11 @@ public struct FlowTask<ID: Hashable & Sendable> {
     public let policy: DuplicateIDPolicy
 
     let work: @isolated(any) () async throws -> ErasedFlowTaskResult
+    let onBeforeStart: (@isolated(any) () async -> Void)?
     let onResult: (@isolated(any) (ErasedFlowTaskResult) async -> Void)?
     let onError: (@isolated(any) (Error) async -> Void)?
     let onCancellation: (@isolated(any) () async -> Void)?
+    let onFinish: (@isolated(any) () async -> Void)?
 
     /// Creates a task with an explicit identifier.
     ///
@@ -52,9 +54,11 @@ public struct FlowTask<ID: Hashable & Sendable> {
     ///   - id: Identifier used to deduplicate and cancel the task later.
     ///   - policy: Duplicate-ID behavior. Defaults to ``DuplicateIDPolicy/cancelAndReplace``.
     ///   - work: Async operation that produces a sendable result.
+    ///   - onBeforeStart: Callback invoked immediately before `work` starts.
     ///   - onResult: Callback invoked after `work` succeeds.
     ///   - onError: Callback invoked when `work` throws a non-cancellation error.
     ///   - onCancellation: Callback invoked when the task is cancelled.
+    ///   - onFinish: Callback invoked after success, failure, or cancellation handling completes.
     ///
     /// The result type is erased internally so different tasks can still be grouped
     /// under the same `FlowTask<ID>` type.
@@ -62,15 +66,18 @@ public struct FlowTask<ID: Hashable & Sendable> {
         id: ID,
         policy: DuplicateIDPolicy = .cancelAndReplace,
         work: @isolated(any) @escaping () async throws -> Success,
+        onBeforeStart: (@isolated(any) () async -> Void)? = nil,
         onResult: (@isolated(any) (Success) async -> Void)? = nil,
         onError: (@isolated(any) (Error) async -> Void)? = nil,
-        onCancellation: (@isolated(any) () async -> Void)? = nil
+        onCancellation: (@isolated(any) () async -> Void)? = nil,
+        onFinish: (@isolated(any) () async -> Void)? = nil
     ) {
         self.id = id
         self.policy = policy
         self.work = {
             ErasedFlowTaskResult(try await work())
         }
+        self.onBeforeStart = onBeforeStart
         if let onResult {
             self.onResult = { result in
                 await onResult(result.value(as: Success.self))
@@ -80,6 +87,7 @@ public struct FlowTask<ID: Hashable & Sendable> {
         }
         self.onError = onError
         self.onCancellation = onCancellation
+        self.onFinish = onFinish
     }
 }
 
@@ -103,17 +111,21 @@ public extension FlowTask where ID == UUID {
     init<Success: Sendable>(
         policy: DuplicateIDPolicy = .cancelAndReplace,
         work: @isolated(any) @escaping () async throws -> Success,
+        onBeforeStart: (@isolated(any) () async -> Void)? = nil,
         onResult: (@isolated(any) (Success) async -> Void)? = nil,
         onError: (@isolated(any) (Error) async -> Void)? = nil,
-        onCancellation: (@isolated(any) () async -> Void)? = nil
+        onCancellation: (@isolated(any) () async -> Void)? = nil,
+        onFinish: (@isolated(any) () async -> Void)? = nil
     ) {
         self.init(
             id: UUID(),
             policy: policy,
             work: work,
+            onBeforeStart: onBeforeStart,
             onResult: onResult,
             onError: onError,
-            onCancellation: onCancellation
+            onCancellation: onCancellation,
+            onFinish: onFinish
         )
     }
 }
